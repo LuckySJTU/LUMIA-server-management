@@ -1,0 +1,312 @@
+#!/bin/python
+import re
+import subprocess
+import pickle
+import time
+import logging
+from logging.handlers import TimedRotatingFileHandler
+
+logger = logging.getLogger('lumia_slurm_rule')
+logger.setLevel(logging.DEBUG)
+file_handler = TimedRotatingFileHandler("/opt/gridview/slurm/log/lumia_slurm_rule.log", when='midnight', interval=1, backupCount=7)
+file_handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+def extract_job_info():
+    command = "/opt/gridview/slurm/bin/scontrol show job"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+
+    if process.returncode != 0:
+        logger.error(stderr.decode('utf-8'))
+        return -1
+
+    data = stdout.decode('utf-8')
+    job_data = re.split(r'\n\s*\n', data.strip())
+
+    jobid_pattern = re.compile(r'JobId=(\d+)')
+    userid_pattern = re.compile(r'UserId=([\w\d]+)')
+    priority_pattern = re.compile(r'Priority=(\d+)')
+    jobstate_pattern = re.compile(r'JobState=([\w]+)')
+    nodelist_pattern = re.compile(r'NodeList=([\w\d]+)')
+    partition_pattern = re.compile(r'Partition=([\w,]+)')
+    tres_pattern = re.compile(r'TRES=cpu=(\d+),mem=(\d+)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?')
+    req_exc_node_pattern = re.compile(r'ReqNodeList=([\w\d]+) ExcNodeList=([\w\d]+)')
+
+    result = {}
+    for job in job_data:
+        jobid_match = jobid_pattern.search(job)
+        userid_match = userid_pattern.search(job)
+        priority_match = priority_pattern.search(job)
+        jobstate_match = jobstate_pattern.search(job)
+        nodelist_match = nodelist_pattern.search(job)
+        partition_match = partition_pattern.search(job)
+        tres_match = tres_pattern.search(job)
+        req_exc_node_match = req_exc_node_pattern.search(job)
+
+        if jobid_match and userid_match and priority_match and jobstate_match and nodelist_match and partition_match and tres_match:
+            jobid = jobid_match.group(1)
+            userid = userid_match.group(1)
+            priority = int(priority_match.group(1))
+            jobstate = jobstate_match.group(1)
+            nodelist = nodelist_match.group(1)
+            partition = partition_match.group(1).split(',')
+            cpu = int(tres_match.group(1))
+            mem = int(tres_match.group(2)) * (1024 if tres_match.group(3) == 'G' else 1)
+            gpu = int(tres_match.group(6)) if tres_match.group(6) else 0
+            reqnodelist = req_exc_node_match.group(1).split(',') if req_exc_node_match else None
+            excnodelist = req_exc_node_match.group(1).split(',') if req_exc_node_match else None
+
+            job_info = {
+                'jobid': jobid,
+                'userid': userid,
+                'priority': priority,
+                'jobstate': jobstate,
+                'nodelist': nodelist,
+                'partition': partition,
+                'cpu': cpu,
+                'mem': mem,
+                'gpu': gpu,
+                'reqnode': reqnodelist,
+                'excnode': excnodelist,
+            }
+
+            if userid not in result:
+                result[userid] = []
+
+            result[userid].append(job_info)
+
+    return result
+
+def filter_jobs(job_info):
+    schedulable_jobs = []
+    terminable_jobs = []
+
+    for userid, jobs in job_info.items():
+        running_jobs = [job for job in jobs if job['jobstate'] == 'RUNNING']
+
+        for job in jobs:
+            if 'debug' in job['partition'] or 'cpu' in job['partition']:
+                continue
+            if job['jobstate'] == 'PENDING' and job['priority'] >= 2000:
+                schedulable_jobs.append(job)
+            if job['jobstate'] == 'RUNNING' and job['priority'] <= 1000:
+                terminable_jobs.append(job)
+        if len(running_jobs) == 1:
+            single_running_job = running_jobs[0]
+            terminable_jobs = [job for job in terminable_jobs if job['jobid'] != single_running_job['jobid']]
+
+    return schedulable_jobs, terminable_jobs
+
+def get_avai_resource():
+    command = "/opt/gridview/slurm/bin/scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode == 0:
+        data = stdout.decode('utf-8')
+        lines = data.strip().split('\n')
+
+        result = {}
+
+        node_pattern = re.compile(r'NodeName=(\w+)')
+        state_pattern = re.compile(r'   State=(\w+)')
+        cfg_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+)([MG]),billing=\d+,gres/gpu=(\d+)')
+        alloc_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+)([MG]),gres/gpu=(\d+)')
+
+        for line in lines:
+            if 'CfgTRES' in line:
+                match = cfg_pattern.match(line)
+                if match:
+                    cpu, mem, mem_unit, gpu = match.groups()
+                    result[nodename]['cfg']['cpu'] = int(cpu)
+                    mem_value = int(mem) * (1024 if mem_unit == 'G' else 1)
+                    mem_value -= 10240
+                    result[nodename]['cfg']['mem'] = mem_value
+                    result[nodename]['cfg']['gpu'] = int(gpu)
+            elif 'AllocTRES' in line:
+                match = alloc_pattern.match(line)
+                if match:
+                    cpu, mem, mem_unit, gpu = match.groups()
+                    result[nodename]['alloc']['cpu'] = int(cpu)
+                    mem_value = int(mem) * (1024 if mem_unit == 'G' else 1)
+                    result[nodename]['alloc']['mem'] = mem_value
+                    result[nodename]['alloc']['gpu'] = int(gpu)
+            elif 'NodeName' in line:
+                match = node_pattern.match(line)
+                if match:
+                    nodename = match.group(1)
+                    result[nodename] = {'state':'UNKNOWN','alloc':{'cpu':0,'mem':0,'gpu':0},'cfg':{'cpu':0,'mem':0,'gpu':0}}
+            elif 'State' in line:
+                match = state_pattern.match(line)
+                if match:
+                    state = match.group(1)
+                    result[nodename]['state'] = state
+        return result
+    else:
+        logger.error(stderr.decode('utf-8'))
+        return -1
+
+def get_partition():
+    command = "/opt/gridview/slurm/bin/sinfo -N"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        logger.error(stderr.decode('utf-8'))
+        return None
+    else:
+        data = stdout.decode('utf-8')
+        lines = data.strip().split('\n')
+        partition = {}
+        for line in lines[1:]:
+            node, _, p, _ = line.split()
+            p = p.strip('*')
+            if p not in partition:
+                partition[p] = []
+            partition[p].append(node)
+        return partition
+
+def requeue_job(jobs):
+    with open("/opt/gridview/slurm/lumia_rule.pkl", 'rb') as f:
+        data = pickle.load(f)
+    stamp = time.time()
+    for job in jobs:
+        data[job['userid']] = stamp
+        # TODO requeu some job
+        command = "/opt/gridview/slurm/bin/scontrol requeue " + job['jobid']
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            logger.error(stderr.decode('utf-8'))
+            command = "/opt/gridview/slurm/bin/scancel " + job['jobid']
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate()
+            if process.returncode != 0:
+                logger.error(stderr.decode('utf-8'))
+                logger.fatal("Job {} can not be requeued or cancelled".format(job['jobid']))
+            else:
+                data[job['userid']] = stamp
+                logger.warning("Job {} has been cancelled".format(job['jobid']))
+        else:
+            data[job['userid']] = stamp
+            logger.warning("Job {} has been requeued".format(job['jobid']))
+    with open("/opt/gridview/slurm/lumia_rule.pkl", 'wb') as f:
+        pickle.dump(data, f, protocol=2)
+    logger.info(data)
+    return
+
+def check_resources(schedulable_jobs, terminable_jobs):
+    node_resources = get_avai_resource()
+    node_on_partition = get_partition()
+    for schedulable_job in schedulable_jobs:
+        avai_node = schedulable_job['reqnode']
+        if avai_node is None:
+            avai_node = sum([node_on_partition[p] for p in schedulable_job['partition']], [])
+            avai_node = list(set(avai_node))
+            if schedulable_job['excnode'] is not None:
+                for p in schedulable_job['excnode']:
+                    avai_node.remove(p)
+        assert len(avai_node) > 0
+        logger.debug(avai_node)
+        available_resources = {node:
+            {
+            'cpu': node_resources[node]['cfg']['cpu']-node_resources[node]['alloc']['cpu'],
+            'mem': node_resources[node]['cfg']['mem']-node_resources[node]['alloc']['mem'],
+            'gpu': node_resources[node]['cfg']['gpu']-node_resources[node]['alloc']['gpu'],
+            } for node in avai_node
+        }
+        required_resources = {
+            'cpu': schedulable_job['cpu'],
+            'mem': schedulable_job['mem'],
+            'gpu': schedulable_job['gpu']
+        }
+
+        for node, available_resource in available_resources.items(): 
+            sufficient_resources = True
+            for resource, required in required_resources.items():
+                if available_resource[resource] < required:
+                    sufficient_resources = False
+                    break
+            if sufficient_resources:
+                logger.warning("Job {} can be allocated directly to {}".format(schedulable_job['jobid'], node))
+                schedulable_jobs.remove(schedulable_job)
+                exit(0)
+        else:
+            logger.debug("Resource not enough, try to requeue some jobs")
+        logger.debug(available_resources)
+        candidate_jobs = []
+        for node, available_resource in available_resources.items(): 
+            for terminable_job in terminable_jobs:
+                if terminable_job['nodelist'] == node:
+                    for resource in available_resource:
+                        if required_resources[resource] > available_resource[resource] + terminable_job[resource]:
+                            break
+                    else:
+                        candidate_jobs.append(terminable_job)
+        logger.debug([job['jobid'] for job in candidate_jobs])
+        if len(candidate_jobs) == 1:
+            logger.warning("Job {} can be allocated by requeuing job {} ".format(schedulable_job['jobid'], candidate_jobs[0]['jobid']))
+            requeue_job(candidate_jobs)
+            terminable_jobs.remove(candidate_jobs[0])
+            for resource in ['cpu','mem','gpu']:
+                node_resources[candidate_jobs[0]['nodelist']]['alloc'][resource] -= candidate_jobs[0][resource]
+                node_resources[candidate_jobs[0]['nodelist']]['alloc'][resource] += schedulable_job[resource]
+            continue
+
+        if len(candidate_jobs) > 1:
+            with open("/opt/gridview/slurm/lumia_rule.pkl", 'rb') as f:
+                lately_requeue = pickle.load(f)
+            late_time, late_job = time.time(), None
+            for job in candidate_jobs:
+                user_preempt_time = lately_requeue.get(job['userid'],0)
+                if user_preempt_time < late_time:
+                    late_time = user_preempt_time
+                    late_job = job
+            if late_job is not None:
+                logger.warning("Job {} can be allocated by requeuing job {} ".format(schedulable_job['jobid'], late_job['jobid']))
+                requeue_job([late_job])
+                terminable_jobs.remove(late_job)
+                for resource in ['cpu','mem','gpu']:
+                    node_resources[late_job['nodelist']]['alloc'][resource] -= late_job[resource]
+                    node_resources[late_job['nodelist']]['alloc'][resource] += schedulable_job[resource]
+                continue
+
+        logger.debug("Try to free a node")
+        for node, available_resource in available_resources.items():
+            candidate_jobs = []
+            sufficient_resources_from_terminable = False
+            for job in terminable_jobs:
+                if node == job['nodelist']:
+                    candidate_jobs.append(job)
+                    for resource in available_resource:
+                        available_resource[resource] += job[resource]
+                    for resource, required in required_resources.items():
+                        if available_resource[resource] < required:
+                            break
+                    else:
+                        logger.warning("Job {} can be allocated by requeuing {} ".format(schedulable_job['jobid'], [j['jobid'] for j in candidate_jobs]))
+                        requeue_job(candidate_jobs)
+                        sufficient_resources_from_terminable = True
+                        for j in candidate_jobs:
+                            terminable_jobs.remove(j)
+                        break
+            if sufficient_resources_from_terminable:
+                break
+            if len(candidate_jobs) > 0:
+                logger.debug("Clearing {} wont satisfies {} in which node jobs are {}".format(node, schedulable_job['jobid'], [j['jobid'] for j in candidate_jobs]))
+            else:
+                logger.debug("There is no requeueable job on {}".format(node))
+
+if __name__ == "__main__":
+    job_info_result = extract_job_info()
+    for user,jobs in job_info_result.items():
+        logger.debug((user,[job['jobid'] for job in jobs]))
+    if job_info_result != -1:
+        schedulable_jobs, terminable_jobs = filter_jobs(job_info_result)
+        logger.debug([job['jobid'] for job in schedulable_jobs])
+        logger.debug([job['jobid'] for job in terminable_jobs])
+        if schedulable_jobs and terminable_jobs:
+            check_resources(schedulable_jobs, terminable_jobs)
+        else:
+            logger.info("Nothing should be done")

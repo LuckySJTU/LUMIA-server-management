@@ -1,0 +1,121 @@
+#!/bin/python
+# -*- coding: utf-8 -*-
+import subprocess
+import re
+
+class Colors:
+    GREEN = '\033[92m'
+    CYAN = '\033[96m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    RESET = '\033[0m'
+
+command = "scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'"
+
+process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+stdout, stderr = process.communicate()
+
+if process.returncode == 0:
+    data = stdout.decode('utf-8')
+
+    lines = data.strip().split('\n')
+
+    result = []
+
+    node_pattern = re.compile(r'NodeName=(\w+)')
+    state_pattern = re.compile(r'   State=([\w\+]+)')
+    cfg_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+)([MG]),billing=\d+,gres/gpu=(\d+)')
+    alloc_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+)([MG]),gres/gpu=(\d+)')
+
+    for line in lines:
+        if 'CfgTRES' in line:
+            match = cfg_pattern.match(line)
+            if match:
+                cpu, mem, mem_unit, gpu = match.groups()
+                result[-1]['cfg']['cpu'] = int(cpu)
+                mem_value = int(mem) if mem_unit == 'G' else int(int(mem)/102.4)/10
+		mem_value -= 10
+                result[-1]['cfg']['mem'] = mem_value
+                result[-1]['cfg']['gpu'] = int(gpu)
+        elif 'AllocTRES' in line:
+            match = alloc_pattern.match(line)
+            if match:
+                cpu, mem, mem_unit, gpu = match.groups()
+                result[-1]['alloc']['cpu'] = int(cpu)
+                mem_value = int(mem) if mem_unit == 'G' else int(int(mem)/102.4)/10
+                result[-1]['alloc']['mem'] = mem_value
+                result[-1]['alloc']['gpu'] = int(gpu)
+            else:
+                alloc_cpu_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+)([MG])')
+                match = alloc_cpu_pattern.match(line)
+                if match:
+                    cpu, mem, mem_unit = match.groups()
+                    result[-1]['alloc']['cpu'] = int(cpu)
+                    mem_value = int(mem) if mem_unit == 'G' else int(int(mem)/102.4)/10
+                    result[-1]['alloc']['mem'] = mem_value
+        elif 'NodeName' in line:
+            match = node_pattern.match(line)
+            if match:
+                nodename = match.group(1)
+                result.append({'nodename':nodename,'state':'UNKNOWN','alloc':{'cpu':0,'mem':0,'gpu':0},'cfg':{'cpu':0,'mem':0,'gpu':0}})
+        elif 'State' in line:
+            match = state_pattern.match(line)
+            if match:
+                state = match.group(1)
+                result[-1]['state'] = state
+    # l = 9
+    # for res in result:
+    #     state = res['state']
+    #     if len(state) > l:
+    #         l = len(state)
+    # formation = "{:>8}{:>9}{:>12}{:>5}  {:<"+str(l)+"}"
+    formation = "    {:>8}{:>9}{:>10}{:>5}  {}"
+    print(formation.format("NODENAME","CPU","MEM","GPU","STATE"))
+    # formation = "{:>8}{:>9}{:>12}{:>5}  {:<"+str(l+9)+"}"
+    for res in result:
+        state = res['state']
+        if '+' in state:
+            flag = state.split('+')
+            flag = flag[-1]
+        else:
+            flag = state
+        if flag == 'DOWN' or flag == 'FAIL':
+            state = Colors.MAGENTA+state+Colors.RESET
+        elif flag == 'RESUME' or flag == 'UNDRAIN':
+            state = state
+        elif flag == 'DRAIN' or flag == 'NoResp':
+            state = Colors.RED+state+Colors.RESET
+        elif flag == 'FUTURE' or flag == 'CANCEL_REBOOT':
+            state = Colors.YELLOW+state+Colors.RESET
+        elif flag == 'IDLE':
+            state = Colors.GREEN+state+Colors.RESET
+        elif flag == 'ALLOCATED':
+            state = Colors.BLUE+state+Colors.RESET
+        else:
+	    if res['alloc']['gpu'] < res['cfg']['gpu'] and res['alloc']['cpu'] < res['cfg']['cpu']-2 and res['alloc']['mem'] < res['cfg']['mem']-16:
+                state = Colors.CYAN+'MIXED'+Colors.RESET
+            else:
+                state = Colors.BLUE+"ALLOCATED"+Colors.RESET
+        print(formation.format(res['nodename'],str(res['alloc']['cpu'])+'/'+str(res['cfg']['cpu']),str(res['alloc']['mem'])+'/'+str(res['cfg']['mem'])+'G',str(res['alloc']['gpu'])+'/'+str(res['cfg']['gpu']),state))
+    # import datetime
+    # current_date = datetime.datetime.now().date()
+    # target_date = datetime.date(2024,9,17)
+    # if current_date == target_date:
+    #     print("    中秋节快乐喵~")
+    command = "squeue --state=PD"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode == 0:
+        data = stdout.decode('utf-8')
+        lines = data.strip().split('\n')
+        if len(lines) > 1:
+            print("    集群还有{}个任务排队中".format(str(len(lines)-1)))
+        else:
+            print("    努力！努力你就是LUMIA一哥，不努力你就是LUMIA一哥们。")
+    else:
+        print("    永远相信美好的事情即将发生。")
+else:
+    print("Runtime Error")
+    print(stderr.decode('utf-8'))

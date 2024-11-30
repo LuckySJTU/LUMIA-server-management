@@ -1,0 +1,542 @@
+#!/bin/python
+# -*- coding: utf-8 -*-
+import curses
+import time
+import subprocess
+import re
+import locale
+from collections import Counter
+from copy import deepcopy
+
+def print_time(stdscr):
+    # 获取当前时间
+    current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    # 在第一行显示当前时间，使用黑字白底
+    stdscr.addstr(0, 0, current_time, curses.color_pair(1))
+
+
+def get_savai():
+    command = "scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'"
+
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+
+    if process.returncode == 0:
+        data = stdout.decode('utf-8')
+        lines = data.strip().split('\n')
+        result = []
+        node_pattern = re.compile(r'NodeName=(\w+)')
+        state_pattern = re.compile(r'   State=([\w\+]+)')
+        cfg_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+)([MG]),billing=\d+,gres/gpu=(\d+)')
+        alloc_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+)([MG]),gres/gpu=(\d+)')
+
+        for line in lines:
+            if 'CfgTRES' in line:
+                match = cfg_pattern.match(line)
+                if match:
+                    cpu, mem, mem_unit, gpu = match.groups()
+                    result[-1]['cfg']['cpu'] = int(cpu)
+                    mem_value = int(mem) if mem_unit == 'G' else int(int(mem)/102.4)/10
+                    mem_value -= 10
+                    result[-1]['cfg']['mem'] = mem_value
+                    result[-1]['cfg']['gpu'] = int(gpu)
+            elif 'AllocTRES' in line:
+                match = alloc_pattern.match(line)
+                if match:
+                    cpu, mem, mem_unit, gpu = match.groups()
+                    result[-1]['alloc']['cpu'] = int(cpu)
+                    mem_value = int(mem) if mem_unit == 'G' else int(int(mem)/102.4)/10
+                    result[-1]['alloc']['mem'] = mem_value
+                    result[-1]['alloc']['gpu'] = int(gpu)
+                else:
+                    alloc_cpu_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+)([MG])')
+                    match = alloc_cpu_pattern.match(line)
+                    if match:
+                        cpu, mem, mem_unit = match.groups()
+                        result[-1]['alloc']['cpu'] = int(cpu)
+                        mem_value = int(mem) if mem_unit == 'G' else int(int(mem)/102.4)/10
+                        result[-1]['alloc']['mem'] = mem_value
+            elif 'NodeName' in line:
+                match = node_pattern.match(line)
+                if match:
+                    nodename = match.group(1)
+                    result.append({'nodename':nodename,'state':'UNKNOWN','alloc':{'cpu':0,'mem':0,'gpu':0},'cfg':{'cpu':0,'mem':0,'gpu':0}})
+            elif 'State' in line:
+                match = state_pattern.match(line)
+                if match:
+                    state = match.group(1)
+                    result[-1]['state'] = state
+        return result
+    else:
+        return stderr.decode('utf-8')
+
+
+def print_node_name(stdscr):
+    for i in range(1, 10):
+        stdscr.addstr(i, 0, "{}".format(i), curses.color_pair(6))
+
+
+def print_node_resource_err(stdscr, result, start_y=3):
+    stdscr.addstr(1, start_y, str(result), curses.color_pair(2))
+
+
+def get_alloc_color(alloc, all):
+    if alloc < all*0.5:
+        color = 4 #绿色
+    elif alloc > all * 0.9:
+        color = 7 # 品红
+    else:
+        color = 5 # 黄色
+    return color
+
+
+def get_alloc_logo(alloc, all):
+    if alloc == 0:
+        logo = "▢"
+    elif alloc <= all * 0.125:
+        logo = '▁'
+    elif alloc <= all * 0.25:
+        logo = '▂'
+    elif alloc <= all * 0.333:
+        logo = '▃'
+    elif alloc <= all * 0.5:
+        logo = '▄'
+    elif alloc <= all * 0.625:
+        logo = '▅'
+    elif alloc <= all * 0.75:
+        logo = '▆'
+    elif alloc <= all * 0.875:
+        logo = '▇'
+    else:
+        logo = '█'
+    return logo
+
+
+def get_partition_order(x):
+    partition_order = {"A100":0, "RTX3090":1, "RTX4090":2, "ADA6000":3}
+    return partition_order.get(x, 99)
+
+
+def get_nodelist_order(x):
+    if x.startswith("("): return "zzzzzzzzzzz"+x
+    else: return x
+
+
+def get_second(slurm_time):
+    slurm_time = slurm_time.split('-')  # 分离天数和时间部分
+    if len(slurm_time)>1: days, time_part = slurm_time[0], slurm_time[1]
+    else: days, time_part = 0, slurm_time[0]
+    time_part = time_part.split(':')
+    if len(time_part) == 3: hours, minutes, seconds = map(int, time_part)  # 分解时、分、秒
+    elif len(time_part) == 2: hours, minutes, seconds = 0, int(time_part[0]), int(time_part[1])
+    elif len(time_part) == 1: hours, minutes, seconds = 0, 0, int(time_part[0])
+    # 计算总秒数
+    total_seconds = int(days) * 24 * 3600 + hours * 3600 + minutes * 60 + seconds
+    return total_seconds
+
+
+def get_squeue_sort_func(key):
+    sort_dict = {"j":8, "a":41, "e":9, "u":20, "s":19, "t":38, "l":11, "c":28, "m":12, "g":1, "q":16, "p":42, "n":43}
+    idx = sort_dict.get(key.lower()[-1], 8)
+    if key in 'tl':
+        # 处理时间格式
+        return lambda x:get_second(x[idx])
+    elif key in 'cmgp':
+        # 处理数字格式
+        return lambda x:int(x[idx])
+    elif key == 'a':
+        # 处理队列
+        return lambda x:get_partition_order(x[idx])
+    elif key == 'n':
+        # 处理nodelist(reason)
+        return lambda x:get_nodelist_order(x[idx])
+    else:
+        return lambda x:x[idx]
+
+
+def print_node_resource_cpu(stdscr, result, start_y, full=False):
+    # length: 7/26
+    start_x = 1
+    if full:
+        # 位置充足时，输出[|||20|||]xxx/xxx
+        for idx in range(len(result)):
+            alloc_cpu = result[idx]['alloc']['cpu']
+            all_cpu = result[idx]['cfg']['cpu']
+            color = get_alloc_color(alloc_cpu, all_cpu)
+            count = int(1.0*alloc_cpu/all_cpu*20)
+            if alloc_cpu > 0 and count == 0: count = 1
+            if alloc_cpu < all_cpu and count == 20: count = 19
+            stdscr.addstr(start_x + idx, start_y, '[', curses.color_pair(1))
+            stdscr.addstr(start_x + idx, start_y+1, "|"*count, curses.color_pair(color))
+            cpu_ratio = int(100.0*alloc_cpu/all_cpu)
+            if alloc_cpu > 0 and cpu_ratio == 0: cpu_ratio = "<1"
+            if alloc_cpu < all_cpu and cpu_ratio == 100: cpu_ratio = 99
+            stdscr.addstr(start_x + idx, start_y+21, '{:>3.3}%'.format(str(cpu_ratio)), curses.color_pair(1))
+            stdscr.addstr(start_x + idx, start_y+21+4, ']', curses.color_pair(1))
+
+    else:
+        # 位置不足时，只输出xxx/xxx
+        for idx in range(len(result)):
+            alloc_cpu = result[idx]['alloc']['cpu']
+            all_cpu = result[idx]['cfg']['cpu']
+            color = get_alloc_color(alloc_cpu, all_cpu)
+            stdscr.addstr(start_x + idx, start_y, "{:>3}/".format(str(alloc_cpu)), curses.color_pair(color))
+            stdscr.addstr(start_x + idx, start_y+4, "{:<3}".format(str(all_cpu)), curses.color_pair(1))
+
+
+def print_node_resource_gpu(stdscr, result, start_y, full=False):
+    # length: 3/10
+    # " □ ■"
+    start_x = 1
+    if full:
+        # 位置充足时，输出[■■■■□□□□]
+        for idx in range(len(result)):
+            alloc_gpu = result[idx]['alloc']['gpu']
+            all_gpu = result[idx]['cfg']['gpu']
+            color = get_alloc_color(alloc_gpu, all_gpu)
+            # stdscr.addstr(start_x + idx, start_y, "[", curses.color_pair(1))
+            # stdscr.addstr(start_x + idx, start_y+1, "■"*alloc_gpu+"□"*(all_gpu-alloc_gpu), curses.color_pair(1))
+            # stdscr.addstr(start_x + idx, start_y+1+9, str(alloc_gpu), curses.color_pair(color))
+            # stdscr.addstr(start_x + idx, start_y+1+9+1, "/{}]".format(str(all_gpu)), curses.color_pair(1))
+            stdscr.addstr(start_x + idx, start_y, "[", curses.color_pair(1))
+            stdscr.addstr(start_x + idx, start_y+1, "■"*alloc_gpu+"□"*(all_gpu-alloc_gpu), curses.color_pair(color))
+            stdscr.addstr(start_x + idx, start_y+1+all_gpu, ']', curses.color_pair(1))
+            
+    else:
+        # 位置不足时，输出x/x
+        for idx in range(len(result)):
+            alloc_gpu = result[idx]['alloc']['gpu']
+            all_gpu = result[idx]['cfg']['gpu']
+            color = get_alloc_color(alloc_gpu, all_gpu)
+            stdscr.addstr(start_x + idx, start_y, str(alloc_gpu), curses.color_pair(color))
+            stdscr.addstr(start_x + idx, start_y+1, "/{}".foramt(str(all_gpu)), curses.color_pair(1))
+
+
+def print_node_resource_mem(stdscr, result, start_y, full=False):
+    # length: 8/20
+    start_x = 1
+    if full:
+        # 位置充足时，输出[||||10|||| xxx/xxxG]
+        for idx in range(len(result)):
+            alloc_mem = result[idx]['alloc']['mem']
+            all_mem = result[idx]['cfg']['mem']
+            color = get_alloc_color(alloc_mem, all_mem)
+            count = int(1.0*alloc_mem/all_mem*10)
+            if alloc_mem > 0 and count == 0: count = 1
+            stdscr.addstr(start_x + idx, start_y, '[', curses.color_pair(1))
+            stdscr.addstr(start_x + idx, start_y+1, "|"*count, curses.color_pair(color))
+            stdscr.addstr(start_x + idx, start_y+1+10, "{:>3}/{}G]".format(str(alloc_mem), str(all_mem)), curses.color_pair(1))
+            
+    else:
+        # 位置不足时，输出xxx/xxxG
+        for idx in range(len(result)):
+            alloc_mem = result[idx]['alloc']['mem']
+            all_mem = result[idx]['cfg']['mem']
+            mem_ratio = int(100.0*alloc_mem/all_mem)
+            if alloc_mem > 0 and mem_ratio == 0: mem_ratio = "<1"
+            if alloc_mem < all_mem and mem_ratio == 100: mem_ratio = ">99"
+            stdscr.addstr(start_x + idx, start_y, '{:>3.3}%'.format(str(mem_ratio)), curses.color_pair(1))
+
+
+def print_all_job_states(stdscr, start_y):
+    # 17
+    # 获取所有状态的任务
+    command = "squeue --state=ALL --sort=t|awk '{print $5}'"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode == 0:
+        data = stdout.decode('utf-8')
+        lines = data.strip().split('\n')
+        job_state = lines[1:]
+        job_state = dict(Counter(job_state))
+        # 打印各种状态的任务数量
+        states = ['R',"PD","CD","CA","F"]
+        colors = [4,  5,   6,   7,   2]
+        for i in range(len(states)):
+            stdscr.addstr(0, start_y, states[i]+' ', curses.color_pair(colors[i]))
+            stdscr.addstr(0, start_y+1+len(states[i]), str(job_state.get(states[i], 0)), curses.color_pair(1))
+            start_y += 4+len(states[i])
+    else:
+        stdscr.addstr(0, start_y, stderr.decode('utf-8'), curses.color_pair(2))
+
+
+def print_running_job_on_each_node(stdscr, result, start_y):
+    start_x = 1
+    nodelist = [res['nodename'] for res in result]
+    for idx, node in enumerate(nodelist):
+        command = "squeue --sort=i --Format=JobID,PriorityLong --nodelist={}".format(node)
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        if process.returncode == 0:
+            data = stdout.decode('utf-8')
+            lines = data.strip().split('\n')
+            if len(lines) > 1:
+                extra_y = 0
+                for i, line in enumerate(lines[1:]):
+                    line = line.split()
+                    if int(line[1]) >= 2000:
+                        color = 8
+                    elif int(line[1]) < 1500:
+                        color = 1
+                    else:
+                        color = 5
+                    stdscr.addstr(start_x + idx, start_y + extra_y, line[0], curses.color_pair(color))
+                    extra_y += len(line[0]) + 1
+            else:
+                # 如果没有任务，则输出当前节点的状态
+                state = result[idx]['state']
+                if '+' in state:
+                    flag = state.split('+')
+                    flag = flag[-1]
+                else:
+                    flag = state
+                if flag == 'DOWN' or flag == 'FAIL':
+                    color = 13
+                elif flag == 'RESUME' or flag == 'UNDRAIN':
+                    color = 1
+                elif flag == 'DRAIN' or flag == 'NoResp':
+                    color = 2
+                elif flag == 'FUTURE' or flag == 'CANCEL_REBOOT':
+                    color = 5
+                elif flag == 'IDLE':
+                    color = 4
+                elif flag == 'ALLOCATED':
+                    color = 7
+                else:
+                    color = 13
+                stdscr.addstr(start_x + idx, start_y, "*{}*".format(state), curses.color_pair(color))
+        else:
+            stdscr.addstr(start_x + idx, start_y, stderr.decode('utf-8'), curses.color_pair(2))
+
+
+def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
+    command = "squeue --format='%all' --state=ALL"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode == 0:
+        data = stdout.decode('utf-8')
+        lines = data.strip().split('\n')
+        lines = [str(line) for line in lines]
+        data = [line.split('|') for line in lines][1:]
+        
+        # 0-4   ACCOUNT          TRES_PER_NODE MIN_CPUS       MIN_TMP_DISK     END_TIME
+        # 5-9   FEATURES         GROUP         OVER_SUBSCRIBE JOBID            NAME
+        # 10-14 COMMENT          TIME_LIMIT    MIN_MEMORY     REQ_NODES        COMMAND
+        # 15-19 PRIORITY         QOS           REASON                          ST
+        # 20-24 USER             RESERVATION   WCKEY          EXC_NODES        NICE
+        # 25-29 S:C:T            JOBID         EXEC_HOST      CPUS             NODES
+        # 30-34 DEPENDENCY       ARRAY_JOB_ID  GROUP          SOCKETS_PER_NODE CORES_PER_SOCKET
+        # 35-39 THREADS_PER_CORE ARRAY_TASK_ID TIME_LEFT      TIME             NODELIST
+        # 40-44 CONTIGUOUS       PARTITION     PRIORITY       NODELIST(REASON) START_TIME
+        # 45-49 STATE            UID           SUBMIT_TIME    LICENSES         CORE_SPEC
+        # 50-51 SCHEDNODES       WORK_DIR
+        
+        # JOBID PARTITION NAME USER ST TIME TIME-LIMIT CPU MEM GPU QOS PRIORITY NODELIST(REASON)
+        # 8     41        9    20   19 38   11         28  12  1   16  42       43
+        title_list = ['JOBID', "PARTITION", "NAME", "USER", "ST", 
+                      "TIME", "TIME-LIMIT", "CPU", "MEM", "GPU", 
+                      "QOS", "PRIOR", "NODELIST(REASON)"]
+        show_list = [8,41,9,20,19,38,11,28,12,1,16,42,43]
+        # 处理MEM和GPU
+        command = "squeue --Format=jobid,tres-alloc:50 --state=ALL"
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        if process.returncode == 0:
+            lines = stdout.decode('utf-8').strip().split('\n')[1:]
+            tres_alloc = {}
+            for line in lines:
+                line = line.split()
+                if len(line) == 2:
+                    tres_mem = line[1].split(',')[1]
+                    if tres_mem.endswith('G'): tres_mem = tres_mem[4:-1]
+                    elif tres_mem.endswith('M'): tres_mem = str(int(tres_mem[4:-1])//1024)
+                    tres_alloc[line[0]] = tres_mem
+            for idx in range(len(data)):
+                data[idx][12] = tres_alloc.get(data[idx][26], "42")
+                gpus = data[idx][1]
+                gpus = gpus.split(',')[0]
+                data[idx][1] = gpus[4:]
+        else:
+            for idx in range(len(data)):
+                if data[idx][12].endswith('G'): data[idx][12] = data[idx][12][:-1]
+                elif data[idx][12].endswith('M'): data[idx][12] = str(int(data[idx][12][:-1])//1024)
+                gpus = data[idx][1]
+                gpus = gpus.split(',')[0]
+                data[idx][1] = gpus[4:]
+        # 排序
+        data.sort(key=get_squeue_sort_func(sort.lower()[-1]), reverse=sort.startswith('-'))
+        data = data[:max_line]
+
+        # 判断每行内容是否有所更改
+        output_flags = [True] * len(data)
+        if old_data is not None:
+            for idx in range(min(len(data), len(old_data))):
+                if "".join(data[idx]) == "".join(old_data[idx]):
+                    output_flags[idx] = False
+        old_data = deepcopy(data)
+
+        # 统计每个条目的最大长度
+        align_length = [max([len(data[i][j]) for i in range(len(data))]) for j in show_list]
+        # 不少于数据标题长度
+        align_length = [max(align_length[i], len(title_list[i])) for i in range(len(show_list))]
+        # 手动调整某些项目的长度
+        # CPU, MEM, GPU
+        align_length[7] = 3
+        align_length[8] = 3
+        align_length[9] = 3
+        # TIME, TIME-LIMIT
+        align_length[5] = 11
+        align_length[6] = 11
+
+        # 设置对齐格式
+        formation = ("{{:>{}}} "*(len(align_length)-1) + "{{:<{}}}").format(*align_length)
+
+        # 打印标题
+        stdscr.addstr(start_x, 0, formation.format(*title_list), curses.color_pair(9))
+        # 打印内容
+        for idx, line in enumerate(data):
+            if not output_flags[idx]: continue
+            output = [line[i] for i in show_list]
+            stdscr.addstr(start_x+idx+1, 0, formation.format(*output), curses.color_pair(1))
+
+        # 整理排序快捷键
+        sort_key = [("J",0),("A",1),("E",3),("U",0),("S",0),
+                    ("T",0),("L",5),("C",0),("M",0),("G",0),
+                    ("Q",0),("P",0),("N",0)]
+        y = 0
+        for idx, (char, i) in enumerate(sort_key[:-1]):
+            y += align_length[idx] - len(title_list[idx]) + i
+            stdscr.addstr(start_x, y, char, curses.color_pair(9)|curses.A_UNDERLINE)
+            y += len(title_list[idx]) - i
+            y += 1
+        char, i = sort_key[-1]
+        stdscr.addstr(start_x, y+i, char, curses.color_pair(9)|curses.A_UNDERLINE)
+        # 突出当前排序
+        for idx, char in enumerate(sort_key[:-1]):
+            char = char[0].lower()
+            if char == sort.lower()[-1]:
+                stdscr.addstr(start_x, sum(align_length[:idx+1])+idx-len(title_list[idx]), title_list[idx], curses.color_pair(12))
+                stdscr.addstr(start_x, sum(align_length[:idx+1])+idx-len(title_list[idx])+sort_key[idx][1], sort_key[idx][0], curses.color_pair(12)|curses.A_UNDERLINE)
+                break
+        else:
+            # 如果没有break，会到这里
+            stdscr.addstr(start_x, sum(align_length[:-1])+idx+1, title_list[-1], curses.color_pair(12))
+            stdscr.addstr(start_x, sum(align_length[:-1])+idx+1+sort_key[-1][1], sort_key[-1][0], curses.color_pair(12)|curses.A_UNDERLINE)   
+
+    else:
+        stdscr.addstr(start_x+1, 0, stderr.decode('utf-8'), curses.color_pair(2))
+    return old_data
+
+
+def print_keyborad_info(stdscr, start_x):
+    stdscr.addstr(start_x, 0, "F10", curses.color_pair(1))
+    stdscr.addstr(start_x, 3, "Quit", curses.color_pair(10))
+
+
+def print_version_info(stdscr, start_x, width):
+    version = "By Lucky, v1.1"
+    stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
+
+
+def gridview(stdscr):
+    # 取消屏幕回显
+    curses.noecho()
+    # 开启非阻塞输入
+    stdscr.nodelay(1)
+    # 隐藏光标
+    curses.curs_set(0)
+
+    # 设置颜色对比
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)  # 白字黑底
+    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # 红字黑底
+    curses.init_pair(3, curses.COLOR_BLUE, curses.COLOR_BLACK)   # 蓝字黑底
+    curses.init_pair(4, curses.COLOR_GREEN, curses.COLOR_BLACK)  # 绿字黑底
+    curses.init_pair(5, curses.COLOR_YELLOW, curses.COLOR_BLACK) # 黄字黑底
+    curses.init_pair(6, curses.COLOR_CYAN, curses.COLOR_BLACK)   # 青字黑底
+    curses.init_pair(7, curses.COLOR_MAGENTA, curses.COLOR_BLACK)# 品红黑底
+
+    curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_GREEN)  # 白字绿底
+    curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_CYAN)   # 黑字青底
+    curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE) # 黑字白底
+    curses.init_pair(11, curses.COLOR_WHITE, curses.COLOR_CYAN)  # 白字青底
+    curses.init_pair(12, curses.COLOR_BLACK, curses.COLOR_GREEN) # 黑字绿底
+    curses.init_pair(13, curses.COLOR_WHITE, curses.COLOR_RED)   # 白字红底
+
+    # 设置整个窗口的背景颜色为白色
+    # stdscr.bkgd(' ', curses.color_pair(1))
+    job_sort_key = "j"
+    last_update_time = 0
+    old_data = None
+    old_height, old_width = 0, 0
+
+    while True:
+        # 获取屏幕大小
+        height, width = stdscr.getmaxyx()
+        if old_height != height or old_width != width:
+            old_height = height
+            old_width = width
+            last_update_time = 0
+            stdscr.clear()
+        
+        if time.time() - last_update_time >= 1:
+            # 每过1秒刷新一次
+            last_update_time = time.time()
+            # 清屏
+            # stdscr.clear()
+
+            # 时间
+            print_time(stdscr)
+
+            # 各节点资源占用情况
+            print_node_name(stdscr)
+            result = get_savai()
+            if type(result) is not list:
+                print_node_resource_err(stdscr, result, start_y = 3)
+            else:
+                print_node_resource_cpu(stdscr, result, 3, True)
+                print_node_resource_mem(stdscr, result, 3+26+1, True)
+                print_node_resource_gpu(stdscr, result, 3+26+1+20+1, True)
+                print_running_job_on_each_node(stdscr, result, 3+26+1+20+1+10+1)
+            
+                # 任务状态总览
+                print_all_job_states(stdscr, start_y=22)
+
+                # 任务监控指标
+                old_data = print_job_data(stdscr, old_data, start_x=len(result)+2, sort=job_sort_key, max_line=height-1-len(result)-3)
+
+            # 打印键盘快捷键信息
+            print_keyborad_info(stdscr, start_x=height-1)
+            # 打印版本号
+            print_version_info(stdscr, start_x=height-1, width=width)
+            # 刷新屏幕
+            # stdscr.refresh()
+
+        # 检查用户输入，按 'q' 退出
+        try:
+            key = stdscr.getch()
+            if key == curses.KEY_F10:
+                break
+            elif ord('a')<=key<=ord('z') or ord('A')<=key<=ord('Z'):
+                char = chr(key).lower()
+                if job_sort_key.lower() == char:
+                    job_sort_key = '-'+job_sort_key
+                elif char in 'jaeustlcmgqpn':
+                    job_sort_key = char
+                last_update_time = 0
+                stdscr.clear()
+            elif key == curses.KEY_UP:
+                last_update_time = 0
+                stdscr.clear()
+        except Exception:
+            # 无输入时继续
+            pass
+
+if __name__ == "__main__":
+    # 设置区域以支持 UTF-8
+    locale.setlocale(locale.LC_ALL, '')
+    # 启动
+    try:
+        curses.wrapper(gridview)
+    except KeyboardInterrupt:
+        exit(0)
