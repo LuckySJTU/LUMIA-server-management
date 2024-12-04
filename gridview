@@ -369,7 +369,7 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
 
         # 判断每行内容是否有所更改
         output_flags = [True] * len(data)
-        if old_data is not None:
+        if old_data is not None and len(data)>20:
             for idx in range(min(len(data), len(old_data))):
                 if "".join(data[idx]) == "".join(old_data[idx]):
                     output_flags[idx] = False
@@ -434,7 +434,7 @@ def print_keyborad_info(stdscr, start_x):
 
 
 def print_version_info(stdscr, start_x, width):
-    version = "By Lucky, v1.1"
+    version = "By Lucky, v1.2"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
@@ -478,6 +478,7 @@ def gridview(stdscr):
             old_width = width
             last_update_time = 0
             stdscr.clear()
+            old_data = None
         
         if time.time() - last_update_time >= 1:
             # 每过1秒刷新一次
@@ -510,7 +511,7 @@ def gridview(stdscr):
             # 打印版本号
             print_version_info(stdscr, start_x=height-1, width=width)
             # 刷新屏幕
-            # stdscr.refresh()
+            stdscr.refresh()
 
         # 检查用户输入，按 'q' 退出
         try:
@@ -524,9 +525,11 @@ def gridview(stdscr):
                 elif char in 'jaeustlcmgqpn':
                     job_sort_key = char
                 last_update_time = 0
+                old_data = None
                 stdscr.clear()
             elif key == curses.KEY_UP:
                 last_update_time = 0
+                old_data = None
                 stdscr.clear()
         except Exception:
             # 无输入时继续
