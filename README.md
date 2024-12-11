@@ -12,6 +12,8 @@ We hope these scripts help.
 
 # Change log
 ## gridview
+- 2024-12-11 update v1.3
+    - fix some bug
 - 2024-12-4 update v1.2
     - improve stability
 - 2024-11-30 update v1.1 to github.

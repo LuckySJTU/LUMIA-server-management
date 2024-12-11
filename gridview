@@ -373,7 +373,6 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
             for idx in range(min(len(data), len(old_data))):
                 if "".join(data[idx]) == "".join(old_data[idx]):
                     output_flags[idx] = False
-        old_data = deepcopy(data)
 
         # 统计每个条目的最大长度
         align_length = [max([len(data[i][j]) for i in range(len(data))]) for j in show_list]
@@ -425,7 +424,7 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
 
     else:
         stdscr.addstr(start_x+1, 0, stderr.decode('utf-8'), curses.color_pair(2))
-    return old_data
+    return deepcopy(data)
 
 
 def print_keyborad_info(stdscr, start_x):
@@ -434,7 +433,7 @@ def print_keyborad_info(stdscr, start_x):
 
 
 def print_version_info(stdscr, start_x, width):
-    version = "By Lucky, v1.2"
+    version = "By Lucky, v1.3"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
@@ -469,6 +468,7 @@ def gridview(stdscr):
     last_update_time = 0
     old_data = None
     old_height, old_width = 0, 0
+    old_job_list_length = 0
 
     while True:
         # 获取屏幕大小
@@ -483,8 +483,14 @@ def gridview(stdscr):
         if time.time() - last_update_time >= 1:
             # 每过1秒刷新一次
             last_update_time = time.time()
-            # 清屏
-            # stdscr.clear()
+            if old_data is not None and len(old_data) != old_job_list_length:
+                old_job_list_length = len(old_data)
+                # 清屏
+                stdscr.clear()
+                old_data = None
+            if old_job_list_length <= 20:
+                stdscr.clear()
+                old_data = None
 
             # 时间
             print_time(stdscr)
