@@ -72,8 +72,10 @@ def get_savai():
 
 
 def print_node_name(stdscr):
+    global height, width
     for i in range(1, 10):
-        stdscr.addstr(i, 0, "{}".format(i), curses.color_pair(6))
+        if i < height:
+            stdscr.addstr(i, 0, "{}".format(i), curses.color_pair(6))
 
 
 def print_node_resource_err(stdscr, result, start_y=3):
@@ -155,11 +157,17 @@ def get_squeue_sort_func(key):
 
 
 def print_node_resource_cpu(stdscr, result, start_y, full=False):
+    global height, width
+    if start_y >= width:
+        return start_y+1
     # length: 7/26
     start_x = 1
+    full = full and width > 2*(start_y+20+1)
     if full:
         # 位置充足时，输出[|||20|||]xxx/xxx
         for idx in range(len(result)):
+            if start_x + idx >= height:
+                break
             alloc_cpu = result[idx]['alloc']['cpu']
             all_cpu = result[idx]['cfg']['cpu']
             color = get_alloc_color(alloc_cpu, all_cpu)
@@ -173,24 +181,31 @@ def print_node_resource_cpu(stdscr, result, start_y, full=False):
             if alloc_cpu < all_cpu and cpu_ratio == 100: cpu_ratio = 99
             stdscr.addstr(start_x + idx, start_y+21, '{:>3.3}%'.format(str(cpu_ratio)), curses.color_pair(1))
             stdscr.addstr(start_x + idx, start_y+21+4, ']', curses.color_pair(1))
-
     else:
         # 位置不足时，只输出xxx/xxx
         for idx in range(len(result)):
+            if start_x + idx >= height:
+                break
             alloc_cpu = result[idx]['alloc']['cpu']
             all_cpu = result[idx]['cfg']['cpu']
             color = get_alloc_color(alloc_cpu, all_cpu)
             stdscr.addstr(start_x + idx, start_y, "{:>3}/".format(str(alloc_cpu)), curses.color_pair(color))
             stdscr.addstr(start_x + idx, start_y+4, "{:<3}".format(str(all_cpu)), curses.color_pair(1))
+    
+    return start_y+26+1 if full else start_y+7+1
 
 
 def print_node_resource_gpu(stdscr, result, start_y, full=False):
+    global height, width
     # length: 3/10
     # " □ ■"
     start_x = 1
+    full = full and width > 2*(start_y+10+1)
     if full:
         # 位置充足时，输出[■■■■□□□□]
         for idx in range(len(result)):
+            if start_x + idx >= height:
+                break
             alloc_gpu = result[idx]['alloc']['gpu']
             all_gpu = result[idx]['cfg']['gpu']
             color = get_alloc_color(alloc_gpu, all_gpu)
@@ -205,19 +220,29 @@ def print_node_resource_gpu(stdscr, result, start_y, full=False):
     else:
         # 位置不足时，输出x/x
         for idx in range(len(result)):
+            if start_x + idx >= height:
+                break
             alloc_gpu = result[idx]['alloc']['gpu']
             all_gpu = result[idx]['cfg']['gpu']
             color = get_alloc_color(alloc_gpu, all_gpu)
             stdscr.addstr(start_x + idx, start_y, str(alloc_gpu), curses.color_pair(color))
-            stdscr.addstr(start_x + idx, start_y+1, "/{}".foramt(str(all_gpu)), curses.color_pair(1))
+            stdscr.addstr(start_x + idx, start_y+1, "/{}".format(str(all_gpu)), curses.color_pair(1))
+    
+    return start_y+10+1 if full else start_y+3+1
 
 
 def print_node_resource_mem(stdscr, result, start_y, full=False):
-    # length: 8/20
+    global height, width
+    if start_y >= width:
+        return start_y+1
+    # length: 4/20
     start_x = 1
+    full = full and width > 2*(start_y+20+1)
     if full:
         # 位置充足时，输出[||||10|||| xxx/xxxG]
         for idx in range(len(result)):
+            if start_x + idx >= height:
+                break
             alloc_mem = result[idx]['alloc']['mem']
             all_mem = result[idx]['cfg']['mem']
             color = get_alloc_color(alloc_mem, all_mem)
@@ -228,8 +253,10 @@ def print_node_resource_mem(stdscr, result, start_y, full=False):
             stdscr.addstr(start_x + idx, start_y+1+10, "{:>3}/{}G]".format(str(alloc_mem), str(all_mem)), curses.color_pair(1))
             
     else:
-        # 位置不足时，输出xxx/xxxG
+        # 位置不足时，输出xxx%
         for idx in range(len(result)):
+            if start_x + idx >= height:
+                break
             alloc_mem = result[idx]['alloc']['mem']
             all_mem = result[idx]['cfg']['mem']
             mem_ratio = int(100.0*alloc_mem/all_mem)
@@ -237,8 +264,11 @@ def print_node_resource_mem(stdscr, result, start_y, full=False):
             if alloc_mem < all_mem and mem_ratio == 100: mem_ratio = ">99"
             stdscr.addstr(start_x + idx, start_y, '{:>3.3}%'.format(str(mem_ratio)), curses.color_pair(1))
 
+    return start_y+20+1 if full else start_y+4+1
+
 
 def print_all_job_states(stdscr, start_y):
+    global height, width
     # 17
     # 获取所有状态的任务
     command = "squeue --state=ALL --sort=t|awk '{print $5}'"
@@ -261,6 +291,7 @@ def print_all_job_states(stdscr, start_y):
 
 
 def print_running_job_on_each_node(stdscr, result, start_y):
+    global height, width
     start_x = 1
     nodelist = [res['nodename'] for res in result]
     for idx, node in enumerate(nodelist):
@@ -282,6 +313,8 @@ def print_running_job_on_each_node(stdscr, result, start_y):
                         color = 5
                     stdscr.addstr(start_x + idx, start_y + extra_y, line[0], curses.color_pair(color))
                     extra_y += len(line[0]) + 1
+                    if start_y + extra_y >= width:
+                        break
             else:
                 # 如果没有任务，则输出当前节点的状态
                 state = result[idx]['state']
@@ -310,6 +343,7 @@ def print_running_job_on_each_node(stdscr, result, start_y):
 
 
 def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
+    global height, width
     command = "squeue --format='%all' --state=ALL"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
@@ -367,6 +401,9 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
         data.sort(key=get_squeue_sort_func(sort.lower()[-1]), reverse=sort.startswith('-'))
         data = data[:max_line]
 
+        if len(data) == 0:
+            return None
+
         # 判断每行内容是否有所更改
         output_flags = [True] * len(data)
         if old_data is not None and len(data)>20:
@@ -396,7 +433,7 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
         for idx, line in enumerate(data):
             if not output_flags[idx]: continue
             output = [line[i] for i in show_list]
-            stdscr.addstr(start_x+idx+1, 0, formation.format(*output), curses.color_pair(1))
+            stdscr.addstr(start_x+idx+1, 0, formation.format(*output)[:width-1], curses.color_pair(1))
 
         # 整理排序快捷键
         sort_key = [("J",0),("A",1),("E",3),("U",0),("S",0),
@@ -405,11 +442,15 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
         y = 0
         for idx, (char, i) in enumerate(sort_key[:-1]):
             y += align_length[idx] - len(title_list[idx]) + i
+            if y >= width:
+                break
             stdscr.addstr(start_x, y, char, curses.color_pair(9)|curses.A_UNDERLINE)
             y += len(title_list[idx]) - i
             y += 1
-        char, i = sort_key[-1]
-        stdscr.addstr(start_x, y+i, char, curses.color_pair(9)|curses.A_UNDERLINE)
+        else:
+            char, i = sort_key[-1]
+            if y+i < width:
+                stdscr.addstr(start_x, y+i, char, curses.color_pair(9)|curses.A_UNDERLINE)
         # 突出当前排序
         for idx, char in enumerate(sort_key[:-1]):
             char = char[0].lower()
@@ -428,16 +469,19 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
 
 
 def print_keyborad_info(stdscr, start_x):
+    global height, width
     stdscr.addstr(start_x, 0, "F10", curses.color_pair(1))
     stdscr.addstr(start_x, 3, "Quit", curses.color_pair(10))
 
 
-def print_version_info(stdscr, start_x, width):
-    version = "By Lucky, v1.3"
+def print_version_info(stdscr, start_x):
+    global height, width
+    version = "By Lucky, v1.4"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
 def gridview(stdscr):
+    global height, width
     # 取消屏幕回显
     curses.noecho()
     # 开启非阻塞输入
@@ -501,13 +545,14 @@ def gridview(stdscr):
             if type(result) is not list:
                 print_node_resource_err(stdscr, result, start_y = 3)
             else:
-                print_node_resource_cpu(stdscr, result, 3, True)
-                print_node_resource_mem(stdscr, result, 3+26+1, True)
-                print_node_resource_gpu(stdscr, result, 3+26+1+20+1, True)
-                print_running_job_on_each_node(stdscr, result, 3+26+1+20+1+10+1)
+                start_y = 3
+                start_y = print_node_resource_cpu(stdscr, result, start_y, True)
+                start_y = print_node_resource_mem(stdscr, result, start_y, True)
+                start_y = print_node_resource_gpu(stdscr, result, start_y, True)
+                print_running_job_on_each_node(stdscr, result, start_y)
             
                 # 任务状态总览
-                print_all_job_states(stdscr, start_y=22)
+                print_all_job_states(stdscr, start_y = 22)
 
                 # 任务监控指标
                 old_data = print_job_data(stdscr, old_data, start_x=len(result)+2, sort=job_sort_key, max_line=height-1-len(result)-3)
@@ -515,7 +560,7 @@ def gridview(stdscr):
             # 打印键盘快捷键信息
             print_keyborad_info(stdscr, start_x=height-1)
             # 打印版本号
-            print_version_info(stdscr, start_x=height-1, width=width)
+            print_version_info(stdscr, start_x=height-1)
             # 刷新屏幕
             stdscr.refresh()
 
@@ -541,6 +586,7 @@ def gridview(stdscr):
             # 无输入时继续
             pass
 
+height, width = 100, 80
 if __name__ == "__main__":
     # 设置区域以支持 UTF-8
     locale.setlocale(locale.LC_ALL, '')
@@ -549,3 +595,5 @@ if __name__ == "__main__":
         curses.wrapper(gridview)
     except KeyboardInterrupt:
         exit(0)
+    except curses.error:
+        print("Please use a larger terminal to show detailed information")

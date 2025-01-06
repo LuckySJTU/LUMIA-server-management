@@ -12,6 +12,9 @@ We hope these scripts help.
 
 # Change log
 ## gridview
+- 2025-1-6 update v1.4
+    - flexible terminal size
+    - cpu/mem/gpu state will be short when window is not wide enough
 - 2024-12-11 update v1.3
     - fix some bug
 - 2024-12-4 update v1.2
