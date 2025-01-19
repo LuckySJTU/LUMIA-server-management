@@ -3,7 +3,7 @@ This repo contains scripts of LUMIA server management, most of which are written
 If you also use **slurm** as your hpc scheduler, you can use these scripts to help you manage your server.
 
 We now have
-- `backup_home.sh` A rsync backup script. The server backs up `/home` every day with **crontab**.
+- `backup_home.sh` A rsync backup script. The server backs up `/home` regularly with **crontab**.
 - `gridview` A htop-like script monitoring job configs and node states of slurm. More controls on jobs will be added in the future.
 - `lumia_slurm_rule` Auto-run every minute to apply lumia slurm preemption rule.
 - `savai` A light script for users to show resources allocation on each node.
@@ -30,4 +30,5 @@ We hope these scripts help.
 - 2024-11-30 update to github.
 
 ## savai
+- 2025-1-19 add partition-queue info
 - 2024-11-30 update to github.
