@@ -73,7 +73,7 @@ def get_savai():
 
 def print_node_name(stdscr):
     global height, width
-    for i in range(1, 10):
+    for i in range(1, 12):
         if i < height:
             stdscr.addstr(i, 0, "{}".format(i), curses.color_pair(6))
 
@@ -388,8 +388,11 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
             for idx in range(len(data)):
                 data[idx][12] = tres_alloc.get(data[idx][26], "42")
                 gpus = data[idx][1]
-                gpus = gpus.split(',')[0]
-                data[idx][1] = gpus[4:]
+                if gpus == 'N/A':
+                    data[idx][1] = '0'
+                else:
+                    gpus = gpus.split(',')[0]
+                    data[idx][1] = gpus[4:]
         else:
             for idx in range(len(data)):
                 if data[idx][12].endswith('G'): data[idx][12] = data[idx][12][:-1]
@@ -403,13 +406,6 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
 
         if len(data) == 0:
             return None
-
-        # 判断每行内容是否有所更改
-        output_flags = [True] * len(data)
-        if old_data is not None and len(data)>20:
-            for idx in range(min(len(data), len(old_data))):
-                if "".join(data[idx]) == "".join(old_data[idx]):
-                    output_flags[idx] = False
 
         # 统计每个条目的最大长度
         align_length = [max([len(data[i][j]) for i in range(len(data))]) for j in show_list]
@@ -427,13 +423,23 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
         # 设置对齐格式
         formation = ("{{:>{}}} "*(len(align_length)-1) + "{{:<{}}}").format(*align_length)
 
+        # 判断每行内容是否有所更改
+        output_flags = [True] * len(data)
+        if old_data is not None and len(data)>20:
+            for idx in range(min(len(data), len(old_data))):
+                output = [data[idx][i] for i in show_list]
+                if old_data[idx] == formation.format(*output)[:width-1]:
+                    output_flags[idx] = False
+
         # 打印标题
         stdscr.addstr(start_x, 0, formation.format(*title_list), curses.color_pair(9))
         # 打印内容
+        print_data = []
         for idx, line in enumerate(data):
-            if not output_flags[idx]: continue
-            output = [line[i] for i in show_list]
-            stdscr.addstr(start_x+idx+1, 0, formation.format(*output)[:width-1], curses.color_pair(1))
+            if output_flags[idx]:
+                output = [line[i] for i in show_list]
+                stdscr.addstr(start_x+idx+1, 0, formation.format(*output)[:width-1], curses.color_pair(1))
+                print_data.append(formation.format(*output)[:width-1])
 
         # 整理排序快捷键
         sort_key = [("J",0),("A",1),("E",3),("U",0),("S",0),
@@ -462,10 +468,11 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
             # 如果没有break，会到这里
             stdscr.addstr(start_x, sum(align_length[:-1])+idx+1, title_list[-1], curses.color_pair(12))
             stdscr.addstr(start_x, sum(align_length[:-1])+idx+1+sort_key[-1][1], sort_key[-1][0], curses.color_pair(12)|curses.A_UNDERLINE)   
+        return print_data
 
     else:
         stdscr.addstr(start_x+1, 0, stderr.decode('utf-8'), curses.color_pair(2))
-    return deepcopy(data)
+        return None
 
 
 def print_keyborad_info(stdscr, start_x):
@@ -476,7 +483,7 @@ def print_keyborad_info(stdscr, start_x):
 
 def print_version_info(stdscr, start_x):
     global height, width
-    version = "By Lucky, v1.4"
+    version = "By Lucky, v1.5"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
@@ -512,7 +519,7 @@ def gridview(stdscr):
     last_update_time = 0
     old_data = None
     old_height, old_width = 0, 0
-    old_job_list_length = 0
+    clear_flag = False # 当为True时，在开始时清空输出
 
     while True:
         # 获取屏幕大小
@@ -520,21 +527,17 @@ def gridview(stdscr):
         if old_height != height or old_width != width:
             old_height = height
             old_width = width
-            last_update_time = 0
-            stdscr.clear()
-            old_data = None
+            clear_flag = True
         
-        if time.time() - last_update_time >= 1:
+        if time.time() - last_update_time >= 1 or clear_flag:
             # 每过1秒刷新一次
             last_update_time = time.time()
-            if old_data is not None and len(old_data) != old_job_list_length:
-                old_job_list_length = len(old_data)
-                # 清屏
+            if old_data is None or len(old_data) <= 20:
+                clear_flag = True
+            if clear_flag:
                 stdscr.clear()
                 old_data = None
-            if old_job_list_length <= 20:
-                stdscr.clear()
-                old_data = None
+                clear_flag = False
 
             # 时间
             print_time(stdscr)
@@ -555,7 +558,13 @@ def gridview(stdscr):
                 print_all_job_states(stdscr, start_y = 22)
 
                 # 任务监控指标
-                old_data = print_job_data(stdscr, old_data, start_x=len(result)+2, sort=job_sort_key, max_line=height-1-len(result)-3)
+                old_data = print_job_data(
+                    stdscr, 
+                    old_data, 
+                    start_x=len(result)+2, 
+                    sort=job_sort_key, 
+                    max_line=height-1-len(result)-3
+                )
 
             # 打印键盘快捷键信息
             print_keyborad_info(stdscr, start_x=height-1)
@@ -564,7 +573,7 @@ def gridview(stdscr):
             # 刷新屏幕
             stdscr.refresh()
 
-        # 检查用户输入，按 'q' 退出
+        # 检查用户输入，按 'F10' 退出
         try:
             key = stdscr.getch()
             if key == curses.KEY_F10:
@@ -575,16 +584,14 @@ def gridview(stdscr):
                     job_sort_key = '-'+job_sort_key
                 elif char in 'jaeustlcmgqpn':
                     job_sort_key = char
-                last_update_time = 0
-                old_data = None
-                stdscr.clear()
+                clear_flag = True
             elif key == curses.KEY_UP:
-                last_update_time = 0
-                old_data = None
-                stdscr.clear()
+                clear_flag = True
         except Exception:
             # 无输入时继续
             pass
+
+        time.sleep(0.1)
 
 height, width = 100, 80
 if __name__ == "__main__":
