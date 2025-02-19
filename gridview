@@ -302,6 +302,7 @@ def print_running_job_on_each_node(stdscr, result, start_y):
             data = stdout.decode('utf-8')
             lines = data.strip().split('\n')
             # 输出节点状态，当节点正常(MIXED, ALLOCATED)时不输出，当节点为IDLE时输出IDLE。
+            start_y_origin = start_y
             state = result[idx]['state']
             if '+' in state:
                 flag = state.split('+')
@@ -339,6 +340,7 @@ def print_running_job_on_each_node(stdscr, result, start_y):
                     extra_y += len(line[0]) + 1
                     if start_y + extra_y >= width:
                         break
+            start_y = start_y_origin
         else:
             stdscr.addstr(start_x + idx, start_y, stderr.decode('utf-8'), curses.color_pair(2))
 
