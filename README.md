@@ -12,6 +12,8 @@ We hope these scripts help.
 
 # Change log
 ## gridview
+- 2025-2-19 udpate v1.6
+    - add node state info
 - 2025-2-14 update v1.5
     - improve flexibility
 - 2025-1-6 update v1.4

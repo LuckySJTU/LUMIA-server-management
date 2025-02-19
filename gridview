@@ -301,43 +301,44 @@ def print_running_job_on_each_node(stdscr, result, start_y):
         if process.returncode == 0:
             data = stdout.decode('utf-8')
             lines = data.strip().split('\n')
+            # 输出节点状态，当节点正常(MIXED, ALLOCATED)时不输出，当节点为IDLE时输出IDLE。
+            state = result[idx]['state']
+            if '+' in state:
+                flag = state.split('+')
+                flag = flag[-1]
+            else:
+                flag = state
+            if flag == 'DOWN' or flag == 'FAIL':
+                color = 13 # 白字红底
+            elif flag == 'RESUME' or flag == 'UNDRAIN':
+                color = 10 # 黑字白底
+            elif flag == 'DRAIN' or flag == 'NoResp':
+                color = 2 # 红字黑底
+            elif flag == 'FUTURE' or flag == 'CANCEL_REBOOT':
+                color = 5 # 黄字黑底
+            elif flag == 'IDLE':
+                color = 4 # 绿字黑底
+            elif flag == 'ALLOCATED' or flag == 'MIXED':
+                color = 7 # 品红黑底
+            else:
+                color = 1 # 白字黑底
+            if color != 7:
+                stdscr.addstr(start_x + idx, start_y, "*{}*".format(state), curses.color_pair(color))
+                start_y += len(state)+3
             if len(lines) > 1:
                 extra_y = 0
                 for i, line in enumerate(lines[1:]):
                     line = line.split()
                     if int(line[1]) >= 2000:
-                        color = 8
+                        color = 8 # 白字绿底
                     elif int(line[1]) < 1500:
-                        color = 1
+                        color = 1 # 白字黑底
                     else:
-                        color = 5
+                        color = 5 # 黄字黑底
                     stdscr.addstr(start_x + idx, start_y + extra_y, line[0], curses.color_pair(color))
                     extra_y += len(line[0]) + 1
                     if start_y + extra_y >= width:
                         break
-            else:
-                # 如果没有任务，则输出当前节点的状态
-                state = result[idx]['state']
-                if '+' in state:
-                    flag = state.split('+')
-                    flag = flag[-1]
-                else:
-                    flag = state
-                if flag == 'DOWN' or flag == 'FAIL':
-                    color = 13
-                elif flag == 'RESUME' or flag == 'UNDRAIN':
-                    color = 1
-                elif flag == 'DRAIN' or flag == 'NoResp':
-                    color = 2
-                elif flag == 'FUTURE' or flag == 'CANCEL_REBOOT':
-                    color = 5
-                elif flag == 'IDLE':
-                    color = 4
-                elif flag == 'ALLOCATED':
-                    color = 7
-                else:
-                    color = 13
-                stdscr.addstr(start_x + idx, start_y, "*{}*".format(state), curses.color_pair(color))
         else:
             stdscr.addstr(start_x + idx, start_y, stderr.decode('utf-8'), curses.color_pair(2))
 
@@ -483,7 +484,7 @@ def print_keyborad_info(stdscr, start_x):
 
 def print_version_info(stdscr, start_x):
     global height, width
-    version = "By Lucky, v1.5"
+    version = "By Lucky, v1.6"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
