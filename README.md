@@ -14,6 +14,7 @@ We hope these scripts help.
 ## gridview
 - 2025-2-19 udpate v1.6
     - add node state info
+    - fix fractional memory bug
 - 2025-2-14 update v1.5
     - improve flexibility
 - 2025-1-6 update v1.4
@@ -34,5 +35,6 @@ We hope these scripts help.
 - 2024-11-30 update to github.
 
 ## savai
+- 2025-2-20 fix fractional memory bug
 - 2025-1-19 add partition-queue info
 - 2024-11-30 update to github.
