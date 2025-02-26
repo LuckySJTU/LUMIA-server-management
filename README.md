@@ -12,6 +12,8 @@ We hope these scripts help.
 
 # Change log
 ## gridview
+- 2025-2-26 update v1.7
+    - prepare for v2.0
 - 2025-2-19 udpate v1.6
     - add node state info
     - fix fractional memory bug
