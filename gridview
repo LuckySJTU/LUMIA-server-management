@@ -7,6 +7,7 @@ import re
 import locale
 from collections import Counter
 from copy import deepcopy
+import random
 
 def get_node_number():
     command = 'scontrol show node | grep "NodeName"'
@@ -84,7 +85,7 @@ def get_savai():
 
 def print_node_name(stdscr, node_number):
     height, width = stdscr.getmaxyx()
-    for i in range(1, node_number):
+    for i in range(1, node_number+1):
         if i < height:
             stdscr.addstr(i, 0, "{}".format(i), curses.color_pair(6))
 
@@ -356,7 +357,9 @@ def print_running_job_on_each_node(stdscr, result, start_y):
             stdscr.addstr(start_x + idx, start_y, stderr.decode('utf-8'), curses.color_pair(2))
 
 
-def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
+def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sort_flag=True):
+    global DEBUG_MODE
+
     height, width = stdscr.getmaxyx()
     clear_flag = False
     command = "squeue --format='%all' --state=ALL"
@@ -439,58 +442,58 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999):
         formation = ("{{:>{}}} "*(len(align_length)-1) + "{{:<{}}}").format(*align_length)
 
         # 判断每行内容是否有所更改
+        output_flags = [True] * len(data)
         if old_data is None:
             clear_flag = True
         else:
             if len(old_data) != len(data):
                 clear_flag = True
-        output_flags = [True] * len(data)
-        if old_data is not None and len(data)>20:
-            for idx in range(min(len(data), len(old_data))):
-                output = [data[idx][i] for i in show_list]
-                if old_data[idx] == formation.format(*output)[:width-1]:
-                    output_flags[idx] = False
-
+            elif len(data)>20:
+                for idx in range(min(len(data), len(old_data))):
+                    output = [data[idx][i] for i in show_list]
+                    if old_data[idx] == formation.format(*output)[:width-1]:
+                        output_flags[idx] = False
         # 清除旧数据
         if clear_flag:
             stdscr.clear()
-        # 打印标题
-        stdscr.addstr(start_x, 0, formation.format(*title_list), curses.color_pair(9))
         # 打印内容
         print_data = []
         for idx, line in enumerate(data):
-            if output_flags[idx]:
-                output = [line[i] for i in show_list]
-                stdscr.addstr(start_x+idx+1, 0, formation.format(*output)[:width-1], curses.color_pair(1))
+            output = [line[i] for i in show_list]
             print_data.append(formation.format(*output)[:width-1])
+            if output_flags[idx]:
+                stdscr.addstr(start_x+idx+1, 0, formation.format(*output)[:width-1], curses.color_pair(1 if not DEBUG_MODE else random.randint(1,7)))
 
-        # 整理排序快捷键
-        sort_key = [("J",0),("A",1),("E",3),("U",0),("S",0),
-                    ("T",0),("L",5),("C",0),("M",0),("G",0),
-                    ("Q",0),("P",0),("N",0)]
-        y = 0
-        for idx, (char, i) in enumerate(sort_key[:-1]):
-            y += align_length[idx] - len(title_list[idx]) + i
-            if y >= width:
-                break
-            stdscr.addstr(start_x, y, char, curses.color_pair(9)|curses.A_UNDERLINE)
-            y += len(title_list[idx]) - i
-            y += 1
-        else:
-            char, i = sort_key[-1]
-            if y+i < width:
-                stdscr.addstr(start_x, y+i, char, curses.color_pair(9)|curses.A_UNDERLINE)
-        # 突出当前排序
-        for idx, char in enumerate(sort_key[:-1]):
-            char = char[0].lower()
-            if char == sort.lower()[-1]:
-                stdscr.addstr(start_x, sum(align_length[:idx+1])+idx-len(title_list[idx]), title_list[idx], curses.color_pair(12))
-                stdscr.addstr(start_x, sum(align_length[:idx+1])+idx-len(title_list[idx])+sort_key[idx][1], sort_key[idx][0], curses.color_pair(12)|curses.A_UNDERLINE)
-                break
-        else:
-            # 如果没有break，会到这里
-            stdscr.addstr(start_x, sum(align_length[:-1])+idx+1, title_list[-1], curses.color_pair(12))
-            stdscr.addstr(start_x, sum(align_length[:-1])+idx+1+sort_key[-1][1], sort_key[-1][0], curses.color_pair(12)|curses.A_UNDERLINE)   
+        if clear_flag or change_sort_flag:
+            # 打印标题
+            stdscr.addstr(start_x, 0, formation.format(*title_list), curses.color_pair(9))
+            # 整理排序快捷键
+            sort_key = [("J",0),("A",1),("E",3),("U",0),("S",0),
+                        ("T",0),("L",5),("C",0),("M",0),("G",0),
+                        ("Q",0),("P",0),("N",0)]
+            y = 0
+            for idx, (char, i) in enumerate(sort_key[:-1]):
+                y += align_length[idx] - len(title_list[idx]) + i
+                if y >= width:
+                    break
+                stdscr.addstr(start_x, y, char, curses.color_pair(9)|curses.A_UNDERLINE)
+                y += len(title_list[idx]) - i
+                y += 1
+            else:
+                char, i = sort_key[-1]
+                if y+i < width:
+                    stdscr.addstr(start_x, y+i, char, curses.color_pair(9)|curses.A_UNDERLINE)
+            # 突出当前排序
+            for idx, char in enumerate(sort_key[:-1]):
+                char = char[0].lower()
+                if char == sort.lower()[-1]:
+                    stdscr.addstr(start_x, sum(align_length[:idx+1])+idx-len(title_list[idx]), title_list[idx], curses.color_pair(12))
+                    stdscr.addstr(start_x, sum(align_length[:idx+1])+idx-len(title_list[idx])+sort_key[idx][1], sort_key[idx][0], curses.color_pair(12)|curses.A_UNDERLINE)
+                    break
+            else:
+                # 如果没有break，会到这里
+                stdscr.addstr(start_x, sum(align_length[:-1])+idx+1, title_list[-1], curses.color_pair(12))
+                stdscr.addstr(start_x, sum(align_length[:-1])+idx+1+sort_key[-1][1], sort_key[-1][0], curses.color_pair(12)|curses.A_UNDERLINE)
         return print_data
 
     else:
@@ -502,18 +505,21 @@ def print_keyborad_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
     stdscr.addstr(start_x, 0, "F10", curses.color_pair(1))
     stdscr.addstr(start_x, 3, "Quit", curses.color_pair(10))
+    stdscr.addstr(start_x, 7, "F12", curses.color_pair(1))
+    stdscr.addstr(start_x, 10, "Debug", curses.color_pair(10))
 
 
 def print_version_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
-    version = "By Lucky, v1.7"
+    version = "By Lucky, v1.8"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
 def gridview(stdscr):
-    # global height, width
+    global DEBUG_MODE
 
     NODES = get_node_number()
+    DEBUG_MODE = False
     # 取消屏幕回显
     curses.noecho()
     # 开启非阻塞输入
@@ -547,6 +553,7 @@ def gridview(stdscr):
     clear_win1 = False
     clear_win2 = False
     clear_win3 = False
+    change_sort_flag = False
 
     while True:
         # 获取屏幕大小
@@ -558,6 +565,7 @@ def gridview(stdscr):
             stdscr.clear()
             win1 = curses.newwin(NODES+1, width, 0, 0)
             win2 = curses.newwin(height-NODES-3, width, NODES+2, 0)
+            win2.immedok(True)
             win3 = curses.newwin(1, width, height-1, 0)
             stdscr.refresh() # 确保窗口正确初始化
             last_update_time = 0 # 立即更新
@@ -590,7 +598,6 @@ def gridview(stdscr):
 
                 # win2只在数据迭代时清空
                 if clear_win2:
-                    win2.clear()
                     clear_win2 = False
                     old_data = None
                 # 任务监控指标
@@ -599,25 +606,29 @@ def gridview(stdscr):
                     old_data,
                     start_x=0,
                     sort=job_sort_key, 
-                    max_line=height-1-len(result)-3
+                    max_line=height-1-len(result)-3,
+                    change_sort_flag=change_sort_flag,
                 )
-                win2.refresh()
+                change_sort_flag = False
+                # win2.refresh()
 
             # win3一般不用更新，由用户输入控制
             if clear_win3:
                 win3.clear()
                 clear_win3 = False
-            # 打印键盘快捷键信息
-            print_keyborad_info(win3, start_x=0)
-            # 打印版本号
-            print_version_info(win3, start_x=0)
-            win3.refresh()
+                # 打印键盘快捷键信息
+                print_keyborad_info(win3, start_x=0)
+                # 打印版本号
+                print_version_info(win3, start_x=0)
+                win3.refresh()
 
         # 检查用户输入，按 'F10' 退出
         try:
             key = stdscr.getch()
             if key == curses.KEY_F10:
                 break
+            elif key == curses.KEY_F12:
+                DEBUG_MODE = not DEBUG_MODE
             elif ord('a')<=key<=ord('z') or ord('A')<=key<=ord('Z'):
                 char = chr(key).lower()
                 if job_sort_key.lower() == char:
@@ -625,6 +636,7 @@ def gridview(stdscr):
                 elif char in 'jaeustlcmgqpn':
                     job_sort_key = char
                 last_update_time = 0
+                change_sort_flag = True
             elif key == curses.KEY_UP:
                 last_update_time = 0
         except Exception:

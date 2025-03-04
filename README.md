@@ -12,6 +12,9 @@ We hope these scripts help.
 
 # Change log
 ## gridview
+- 2025-3-4 update v1.8
+    - add a debug mode
+    - improve flexibility
 - 2025-2-26 update v1.7
     - prepare for v2.0
 - 2025-2-19 udpate v1.6
