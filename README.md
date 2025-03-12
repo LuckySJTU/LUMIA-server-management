@@ -37,6 +37,7 @@ We hope these scripts help.
 - 2024-11-30 update to github.
 
 ## lumia_slurm_rule
+- 2025-3-12 fix a bug: now slurm_rule will ignore DRAIN nodes
 - 2024-11-30 update to github.
 
 ## savai

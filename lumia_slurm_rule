@@ -143,6 +143,9 @@ def get_avai_resource():
                 if match:
                     state = match.group(1)
                     result[nodename]['state'] = state
+        for nodename in result.keys():
+            if 'DRAIN' in result[nodename]['state'] or 'DOWN' in result[nodename]['state']:
+                result[nodename]['cfg'] = {'cpu':0,'mem':0,'gpu':0}
         return result
     else:
         logger.error(stderr.decode('utf-8'))
