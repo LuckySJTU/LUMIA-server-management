@@ -11,6 +11,9 @@ We now have
 We hope these scripts help.
 
 # Change log
+## ddl
+- 2025-3-25 init ddl
+    - ddl is a tool to see CCF-conference ddl.
 ## gridview
 - 2025-3-4 update v1.8
     - add a debug mode

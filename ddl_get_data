@@ -1,0 +1,154 @@
+#!/bin/python
+# -*- coding: utf-8 -*-
+
+import requests
+import os
+import yaml
+import codecs
+from datetime import datetime, timedelta
+import pytz
+from copy import deepcopy
+
+TZ_ALIAS_MAP = {
+    'AoE': 'Etc/GMT+12',  # AoE = UTC-12
+    'UTC': 'UTC',
+    'UTC-12': 'Etc/GMT+12',
+    'UTC-11': 'Etc/GMT+11',
+    'UTC-10': 'Etc/GMT+10',
+    'UTC-9':  'Etc/GMT+9',
+    'UTC-8':  'Etc/GMT+8',
+    'UTC-7':  'Etc/GMT+7',
+    'UTC-6':  'Etc/GMT+6',
+    'UTC-5':  'Etc/GMT+5',
+    'UTC-4':  'Etc/GMT+4',
+    'UTC-3':  'Etc/GMT+3',
+    'UTC-2':  'Etc/GMT+2',
+    'UTC-1':  'Etc/GMT+1',
+    'UTC+0':  'Etc/GMT-0',  # 等价于 'UTC'
+    'UTC+1':  'Etc/GMT-1',
+    'UTC+2':  'Etc/GMT-2',
+    'UTC+3':  'Etc/GMT-3',
+    'UTC+4':  'Etc/GMT-4',
+    'UTC+5':  'Etc/GMT-5',
+    'UTC+6':  'Etc/GMT-6',
+    'UTC+7':  'Etc/GMT-7',
+    'UTC+8':  'Etc/GMT-8',
+    'UTC+9':  'Etc/GMT-9',
+    'UTC+10': 'Etc/GMT-10',
+    'UTC+11': 'Etc/GMT-11',
+    'UTC+12': 'Etc/GMT-12',
+}
+
+def parse_to_utc(timestr, tzstr):
+    # 解析成 datetime 对象并统一转成 UTC
+    naive = datetime.strptime(timestr, '%Y-%m-%d %H:%M:%S')
+    tz = pytz.timezone(tzstr)
+    localized = tz.localize(naive)
+    return localized.astimezone(pytz.utc)
+
+def main():
+    url = 'https://ccfddl.com/conference/allconf.yml'
+    save_path = '/opt/ddl/allconf.yml'
+    response = requests.get(url)
+    with codecs.open(save_path, 'w', encoding='utf-8') as f:
+        f.write(response.text)
+    url = 'https://ccfddl.com/conference/allacc.yml'
+    save_path = '/opt/ddl/allacc.yml'
+    response = requests.get(url)
+    with codecs.open(save_path, 'w', encoding='utf-8') as f:
+        f.write(response.text)
+
+    # preprocess allconf data
+    with codecs.open('/opt/ddl/allconf.yml', 'r', encoding='utf-8') as f:
+        allconf = yaml.safe_load(f)
+    output_data = []
+    """
+    每个data的格式：
+    {
+        title: ICML
+        description: International Conference on Machine Learning
+        sub: AI
+        rank: A
+        ccf: A
+        core: A*
+        thcpl: A
+        dblp: icml
+        year: 2025
+        id: icml25
+        link: https://icml.cc/Conferences/2025
+        timeline: [
+            {
+            deadline: '2025-01-23 23:59:59'
+            comment: Abstract Deadline
+            }, 
+            {
+            deadline: '2025-01-30 23:59:59'
+            comment: Paper Submissions Open on OpenReview Jan 08 2025 11:59 PM UTC
+            }
+        ]
+        timeline_raw: [{raw data of timeline}]
+        deadline: earliest avaiable ddl, e.g. 2025-01-23 23:59:59
+        utc_deadline: deadline in UTC
+        timezone: UTC-12
+        date: July 11-19, 2025
+        place: Vancouver Convention Center, Vancouver, Canada
+    }
+    注意不同的年份对应不同的data数据。这里不处理接受率的数据。
+    """
+    now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+    for conf in allconf:
+        data = {
+            'title': conf['title'],
+            'description': conf['description'],
+            'sub': conf['sub'],
+            'rank': conf['rank']['ccf'],
+            'ccf': conf['rank']['ccf'],
+            'core': conf['rank']['core'],
+            'thcpl': conf['rank'].get('thcpl', '-'),
+            'dblp': conf['dblp'],
+        }
+        for each in conf['confs']:
+            data['year'] = each['year']
+            data['id'] = each['id']
+            data['link'] = each['link']
+            data['timezone'] = each['timezone']
+            data['date'] = each['date']
+            data['place'] = each['place']
+            data['timeline_raw'] = each['timeline']
+
+            data['timeline'] = []
+            time_entries = []
+            for tl in data['timeline_raw']:
+                if 'abstract_deadline' in tl:
+                    data['timeline'].append({'deadline':tl['abstract_deadline'], 'comment':'Abstract Deadline'})
+                    if tl['abstract_deadline'] == 'TBD':
+                        time_entries.append('2233-01-01 23:59:59')
+                    else:
+                        time_entries.append(tl['abstract_deadline'])
+                data['timeline'].append({'deadline':tl['deadline'], 'comment':tl.get('comment', '')})
+                if tl['deadline'] == 'TBD':
+                    time_entries.append('2233-01-01 23:59:59')
+                else:
+                    time_entries.append(tl['deadline'])
+            time_utc_list = [(ts, data['timezone'], parse_to_utc(ts, TZ_ALIAS_MAP[data['timezone']])) for ts in time_entries]
+            future_times = [(ts, tz, dt) for ts, tz, dt in time_utc_list if dt > now_utc]
+            if len(future_times) > 0:
+                earliest = min(future_times, key=lambda x: x[2])
+                data['deadline'] = str(earliest[0]) if str(earliest[0])!="2233-01-01 23:59:59" else 'TBD'
+                data['utc_deadline'] = earliest[2]
+            else:
+                latest = max(time_utc_list, key=lambda x: x[2])
+                data['deadline'] = None
+                data['utc_deadline'] = latest[2] + timedelta(days=80000)
+            
+            output_data.append(deepcopy(data))
+    with codecs.open('/opt/ddl/all_conf.yaml', 'w', encoding='utf-8') as f:
+        yaml.dump(output_data, f, default_flow_style=False, allow_unicode=True)
+    
+    # 排除过期会议
+    output_data = [data for data in output_data if data['deadline'] is not None]
+    with codecs.open('/opt/ddl/avai_conf.yaml', 'w', encoding='utf-8') as f:
+        yaml.dump(output_data, f, default_flow_style=False, allow_unicode=True)
+
+if __name__=='__main__':
+    main()
