@@ -12,6 +12,8 @@ We hope these scripts help.
 
 # Change log
 ## ddl
+- 2025-3-26
+    - fix some bug
 - 2025-3-25 init ddl
     - ddl is a tool to see CCF-conference ddl.
 ## gridview

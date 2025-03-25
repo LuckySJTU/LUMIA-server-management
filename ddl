@@ -103,10 +103,10 @@ def parse_to_utc(timestr, tzstr):
     localized = tz.localize(naive)
     return localized.astimezone(pytz.utc)
 
-def calc_timeleft(target, now):
-    target = parse_to_utc(target,'UTC')
+def calc_timeleft(target, tz, now):
+    target = parse_to_utc(target, TZ_ALIAS_MAP[tz])
     if target < now:
-        return '00-00:00:00'
+        return '*-**:**:**'
     delta = target - now
     total_seconds = int(delta.total_seconds())
     days = total_seconds // 86400
@@ -230,7 +230,7 @@ def main(args):
             for tl in data['timeline']:
                 line.append(tl['deadline']+'('+data['timezone']+')' if tl['deadline'] != 'TBD' else 'TBD')
                 if tl['deadline'] != 'TBD':
-                    line.append(calc_timeleft(tl['deadline'], now_utc))
+                    line.append(calc_timeleft(tl['deadline'], data['timezone'], now_utc))
                 else:
                     line.append('')
                 output_str.append(line)
@@ -275,7 +275,6 @@ def main(args):
                     print("Accept_rates: {}".format(','.join(acc['str'] for acc in i['accept_rates'])))
                     break
             print('')
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='用于查看各种会议的ddl信息。数据来自于https://ccfddl.com/')
