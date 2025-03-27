@@ -280,10 +280,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='用于查看各种会议的ddl信息。数据来自于https://ccfddl.com/')
     parser.add_argument('-a', action='store_true', help='Show all conference ddl message')
     parser.add_argument('-c', type=str, help='Show conference ddl info of specific category')
-    parser.add_argument('-l', action='store_true', help='Show detailed conference message')
-    # parser.add_argument('-o', type=str, help='Output format. Default is CONFERENCE RANK DDL(TIMEZONE) TIMELEFT')
-    parser.add_argument('-p', action='store_true', help='Print conference ddl message in split of |')
     parser.add_argument('-s', type=str, help='Search info of specific conference')
+    # parser.add_argument('-o', type=str, help='Output format. Default is CONFERENCE RANK DDL(TIMEZONE) TIMELEFT')
+    parser.add_argument('-l', action='store_true', help='Show detailed conference message')
+    parser.add_argument('-p', action='store_true', help='Print conference ddl message in split of |')
     parser.add_argument('--rank', type=str, choices=['A', 'B', 'C'], help='Show message of ccfA/B/C conference')
 
     args = parser.parse_args()

@@ -283,7 +283,7 @@ def print_all_job_states(stdscr, start_y):
     height, width = stdscr.getmaxyx()
     # 17
     # 获取所有状态的任务
-    command = "squeue --state=ALL --sort=t|awk '{print $5}'"
+    command = "squeue --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO --sort=t|awk '{print $5}'"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
     if process.returncode == 0:
@@ -298,6 +298,8 @@ def print_all_job_states(stdscr, start_y):
             stdscr.addstr(0, start_y, states[i]+' ', curses.color_pair(colors[i]))
             stdscr.addstr(0, start_y+1+len(states[i]), str(job_state.get(states[i], 0)), curses.color_pair(1))
             start_y += 4+len(states[i])
+        count = sum([job_state.get(state, 0) for state in states])
+        stdscr.addstr(0, start_y, "S/T {}/{}".format(str(count), str(len(lines[1:]))), curses.color_pair(1))
     else:
         stdscr.addstr(0, start_y, stderr.decode('utf-8'), curses.color_pair(2))
 
@@ -362,7 +364,7 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
 
     height, width = stdscr.getmaxyx()
     clear_flag = False
-    command = "squeue --format='%all' --state=ALL"
+    command = "squeue --format='%all' --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
     if process.returncode == 0:
@@ -390,7 +392,7 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
                       "QOS", "PRIOR", "NODELIST(REASON)"]
         show_list = [8,41,9,20,19,38,11,28,12,1,16,42,43]
         # 处理MEM和GPU
-        command = "squeue --Format=jobid,tres-alloc:50 --state=ALL"
+        command = "squeue --Format=jobid,tres-alloc:50 --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
         if process.returncode == 0:
