@@ -17,6 +17,9 @@ We hope these scripts help.
 - 2025-3-25 init ddl
     - ddl is a tool to see CCF-conference ddl.
 ## gridview
+- 2025-4-12 update v1.9
+    - add multi-node job support
+    - fix some bug
 - 2025-3-4 update v1.8
     - add a debug mode
     - improve flexibility

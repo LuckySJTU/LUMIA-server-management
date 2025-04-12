@@ -308,8 +308,11 @@ def print_running_job_on_each_node(stdscr, result, start_y):
     height, width = stdscr.getmaxyx()
     start_x = 1
     nodelist = [res['nodename'] for res in result]
+    multi_node_job_color_map = {}
+    multi_node_job_counter = 0
+    multi_node_job_color_list = (3, 6, 7)
     for idx, node in enumerate(nodelist):
-        command = "squeue --sort=i --Format=JobID,PriorityLong --nodelist={}".format(node)
+        command = "squeue --sort=i --Format=JobID,PriorityLong,NodeList --nodelist={}".format(node)
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
         if process.returncode == 0:
@@ -344,12 +347,22 @@ def print_running_job_on_each_node(stdscr, result, start_y):
                 extra_y = 0
                 for i, line in enumerate(lines[1:]):
                     line = line.split()
-                    if int(line[1]) >= 2000:
-                        color = 8 # 白字绿底
-                    elif int(line[1]) < 1500:
+                    priority = int(line[1])
+                    if priority <= 1000:
                         color = 1 # 白字黑底
-                    else:
+                    elif priority <= 1500:
                         color = 5 # 黄字黑底
+                    elif priority <= 2000:
+                        color = 8 # 白字绿底
+                    else:
+                        color = 11 # 白字青底
+                    if '[' in line[2]:
+                        job_ids = int(line[0])
+                        if job_ids not in multi_node_job_color_map:
+                            multi_node_job_color_map[job_ids] = multi_node_job_color_list[multi_node_job_counter]
+                            multi_node_job_counter = (multi_node_job_counter + 1) % len(multi_node_job_color_list)
+                        color = multi_node_job_color_map[job_ids]
+
                     stdscr.addstr(start_x + idx, start_y + extra_y, line[0], curses.color_pair(color))
                     extra_y += len(line[0]) + 1
                     if start_y + extra_y >= width:
@@ -420,6 +433,13 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
                 gpus = data[idx][1]
                 gpus = gpus.split(',')[0]
                 data[idx][1] = gpus[4:]
+        # 对于多卡任务，cpu/mem/gpu需要乘上节点数
+        for idx in range(len(data)):
+            if data[idx][29] > 1:
+                nnodes = int(data[idx][29])
+                data[idx][28] = str(int(data[idx][28]) * nnodes)
+                data[idx][12] = str(int(data[idx][12]) * nnodes)
+                data[idx][1] = str(int(data[idx][1]) * nnodes)
         # 排序
         data.sort(key=get_squeue_sort_func(sort.lower()[-1]), reverse=sort.startswith('-'))
         data = data[:max_line]
@@ -431,14 +451,14 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
         align_length = [max([len(data[i][j]) for i in range(len(data))]) for j in show_list]
         # 不少于数据标题长度
         align_length = [max(align_length[i], len(title_list[i])) for i in range(len(show_list))]
-        # 手动调整某些项目的长度
-        # CPU, MEM, GPU
-        align_length[7] = 3
-        align_length[8] = 3
-        align_length[9] = 3
-        # TIME, TIME-LIMIT
-        align_length[5] = 11
-        align_length[6] = 11
+        # # 手动调整某些项目的长度
+        # # CPU, MEM, GPU
+        # align_length[7] = 3
+        # align_length[8] = 3
+        # align_length[9] = 3
+        # # TIME, TIME-LIMIT
+        # align_length[5] = 11
+        # align_length[6] = 11
 
         # 设置对齐格式
         formation = ("{{:>{}}} "*(len(align_length)-1) + "{{:<{}}}").format(*align_length)
@@ -513,7 +533,7 @@ def print_keyborad_info(stdscr, start_x):
 
 def print_version_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
-    version = "By Lucky, v1.8"
+    version = "By Lucky, v1.9"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
