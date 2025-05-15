@@ -11,6 +11,9 @@ We now have
 We hope these scripts help.
 
 # Change log
+## greeting
+- 2025-5-15 init greeting
+    - greeting is a script to show a greeting message on login.
 ## ddl
 - 2025-3-26
     - fix some bug
