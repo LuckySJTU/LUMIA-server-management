@@ -1,10 +1,9 @@
-#!/bin/python
+#!/bin/python3
 # -*- coding: utf-8 -*-
 
 import requests
 import os
 import yaml
-import codecs
 from datetime import datetime, timedelta
 import pytz
 from copy import deepcopy
@@ -50,51 +49,21 @@ def main():
     url = 'https://ccfddl.com/conference/allconf.yml'
     save_path = '/opt/ddl/allconf.yml'
     response = requests.get(url)
-    with codecs.open(save_path, 'w', encoding='utf-8') as f:
-        f.write(response.text)
+    with open(save_path, 'wb') as f:
+        f.write(response.content)
+
     url = 'https://ccfddl.com/conference/allacc.yml'
     save_path = '/opt/ddl/allacc.yml'
     response = requests.get(url)
-    with codecs.open(save_path, 'w', encoding='utf-8') as f:
-        f.write(response.text)
+    with open(save_path, 'wb') as f:
+        f.write(response.content)
 
     # preprocess allconf data
-    with codecs.open('/opt/ddl/allconf.yml', 'r', encoding='utf-8') as f:
+    with open('/opt/ddl/allconf.yml', 'r') as f:
         allconf = yaml.safe_load(f)
+
     output_data = []
-    """
-    每个data的格式：
-    {
-        title: ICML
-        description: International Conference on Machine Learning
-        sub: AI
-        rank: A
-        ccf: A
-        core: A*
-        thcpl: A
-        dblp: icml
-        year: 2025
-        id: icml25
-        link: https://icml.cc/Conferences/2025
-        timeline: [
-            {
-            deadline: '2025-01-23 23:59:59'
-            comment: Abstract Deadline
-            }, 
-            {
-            deadline: '2025-01-30 23:59:59'
-            comment: Paper Submissions Open on OpenReview Jan 08 2025 11:59 PM UTC
-            }
-        ]
-        timeline_raw: [{raw data of timeline}]
-        deadline: earliest avaiable ddl, e.g. 2025-01-23 23:59:59
-        utc_deadline: deadline in UTC
-        timezone: UTC-12
-        date: July 11-19, 2025
-        place: Vancouver Convention Center, Vancouver, Canada
-    }
-    注意不同的年份对应不同的data数据。这里不处理接受率的数据。
-    """
+
     now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
     for conf in allconf:
         data = {
@@ -120,35 +89,36 @@ def main():
             time_entries = []
             for tl in data['timeline_raw']:
                 if 'abstract_deadline' in tl:
-                    data['timeline'].append({'deadline':tl['abstract_deadline'], 'comment':'Abstract Deadline'})
+                    data['timeline'].append({'deadline': tl['abstract_deadline'], 'comment': 'Abstract Deadline'})
                     if tl['abstract_deadline'] == 'TBD':
                         time_entries.append('2233-01-01 23:59:59')
                     else:
                         time_entries.append(tl['abstract_deadline'])
-                data['timeline'].append({'deadline':tl['deadline'], 'comment':tl.get('comment', '')})
+                data['timeline'].append({'deadline': tl['deadline'], 'comment': tl.get('comment', '')})
                 if tl['deadline'] == 'TBD':
                     time_entries.append('2233-01-01 23:59:59')
                 else:
                     time_entries.append(tl['deadline'])
+
             time_utc_list = [(ts, data['timezone'], parse_to_utc(ts, TZ_ALIAS_MAP[data['timezone']])) for ts in time_entries]
             future_times = [(ts, tz, dt) for ts, tz, dt in time_utc_list if dt > now_utc]
             if len(future_times) > 0:
                 earliest = min(future_times, key=lambda x: x[2])
-                data['deadline'] = str(earliest[0]) if str(earliest[0])!="2233-01-01 23:59:59" else 'TBD'
+                data['deadline'] = str(earliest[0]) if str(earliest[0]) != "2233-01-01 23:59:59" else 'TBD'
                 data['utc_deadline'] = earliest[2]
             else:
                 latest = max(time_utc_list, key=lambda x: x[2])
                 data['deadline'] = None
                 data['utc_deadline'] = latest[2] + timedelta(days=80000)
-            
+
             output_data.append(deepcopy(data))
-    with codecs.open('/opt/ddl/all_conf.yaml', 'w', encoding='utf-8') as f:
-        yaml.dump(output_data, f, default_flow_style=False, allow_unicode=True)
-    
-    # 排除过期会议
-    output_data = [data for data in output_data if data['deadline'] is not None]
-    with codecs.open('/opt/ddl/avai_conf.yaml', 'w', encoding='utf-8') as f:
+
+    with open('/opt/ddl/all_conf.yaml', 'w') as f:
         yaml.dump(output_data, f, default_flow_style=False, allow_unicode=True)
 
-if __name__=='__main__':
+    output_data = [data for data in output_data if data['deadline'] is not None]
+    with open('/opt/ddl/avai_conf.yaml', 'w') as f:
+        yaml.dump(output_data, f, default_flow_style=False, allow_unicode=True)
+
+if __name__ == '__main__':
     main()

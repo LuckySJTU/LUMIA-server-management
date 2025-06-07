@@ -1,0 +1,14 @@
+#!/bin/bash
+OUT="/etc/gpu_pcie_map"
+echo '#!/bin/bash' > $OUT
+echo '# 自动生成，不要手动编辑' >> $OUT
+echo 'declare -A PCIE_TO_ID=(' >> $OUT
+
+nvidia-smi --query-gpu=index,pci.bus_id --format=csv,noheader,nounits | \
+while IFS=',' read -r index bus; do
+    bus_clean=$(echo $bus | xargs)
+    echo "    [\"$bus_clean\"]=$index" >> $OUT
+done
+
+echo ')' >> $OUT
+chmod 644 "$OUT"

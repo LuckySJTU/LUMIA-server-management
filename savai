@@ -1,4 +1,4 @@
-#!/bin/python
+#!/bin/python3
 # -*- coding: utf-8 -*-
 import subprocess
 import re
@@ -35,16 +35,24 @@ if process.returncode == 0:
             if match:
                 cpu, mem, mem_unit, gpu = match.groups()
                 result[-1]['cfg']['cpu'] = int(cpu)
-                mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)/10
+                mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
                 mem_value -= 10
                 result[-1]['cfg']['mem'] = mem_value
                 result[-1]['cfg']['gpu'] = int(gpu)
+            else:
+                cfg_cpu_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),billing=\d+')
+                match = cfg_cpu_pattern.match(line)
+                if match:
+                    cpu, mem, mem_unit = match.groups()
+                    result[-1]['cfg']['cpu'] = int(cpu)
+                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
+                    result[-1]['cfg']['mem'] = mem_value
         elif 'AllocTRES' in line:
             match = alloc_pattern.match(line)
             if match:
                 cpu, mem, mem_unit, gpu = match.groups()
                 result[-1]['alloc']['cpu'] = int(cpu)
-                mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)/10
+                mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
                 result[-1]['alloc']['mem'] = mem_value
                 result[-1]['alloc']['gpu'] = int(gpu)
             else:
@@ -53,7 +61,7 @@ if process.returncode == 0:
                 if match:
                     cpu, mem, mem_unit = match.groups()
                     result[-1]['alloc']['cpu'] = int(cpu)
-                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)/10
+                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
                     result[-1]['alloc']['mem'] = mem_value
         elif 'NodeName' in line:
             match = node_pattern.match(line)
@@ -88,10 +96,19 @@ if process.returncode == 0:
         elif flag == 'ALLOCATED':
             state = Colors.BLUE+state+Colors.RESET
         else:
-            if res['alloc']['gpu'] < res['cfg']['gpu'] and res['alloc']['cpu'] < res['cfg']['cpu']-2 and res['alloc']['mem'] < res['cfg']['mem']-16:
-                state = Colors.CYAN+'MIXED'+Colors.RESET
+            if res['cfg']['gpu'] == 0:
+                if res['alloc']['cpu'] < res['cfg']['cpu']-2 and res['alloc']['mem'] < res['cfg']['mem']-16:
+                    state = Colors.CYAN+'MIXED'+Colors.RESET
+                else:
+                    state = Colors.BLUE+"ALLOCATED"+Colors.RESET
             else:
-                state = Colors.BLUE+"ALLOCATED"+Colors.RESET
+                if res['alloc']['gpu'] < res['cfg']['gpu'] and res['alloc']['cpu'] < res['cfg']['cpu']-2 and res['alloc']['mem'] < res['cfg']['mem']-16:
+                    state = Colors.CYAN+'MIXED'+Colors.RESET
+                else:
+                    state = Colors.BLUE+"ALLOCATED"+Colors.RESET
+        if res['cfg']['gpu'] == 0:
+            res['cfg']['gpu'] = '-'
+            res['alloc']['gpu'] = '-'
         print(formation.format(res['nodename'],str(res['alloc']['cpu'])+'/'+str(res['cfg']['cpu']),str(res['alloc']['mem'])+'/'+str(res['cfg']['mem'])+'G',str(res['alloc']['gpu'])+'/'+str(res['cfg']['gpu']),state))
     # import datetime
     # current_date = datetime.datetime.now().date()
@@ -105,7 +122,7 @@ if process.returncode == 0:
         data = stdout.decode('utf-8')
         lines = data.strip().split('\n')
         if len(lines) > 1:
-            print "    集群还有{}个任务排队中".format(str(len(lines)-1)),
+            print("    集群还有{}个任务排队中".format(str(len(lines)-1)), end='')
             a100, rtx3090, rtx4090, ada6000, l40s = 0, 0, 0, 0, 0
             for line in lines[1:]:
                 if 'A100' in line:
@@ -119,15 +136,15 @@ if process.returncode == 0:
                 if 'L40S' in line:
                     l40s += 1
             if a100 > 0:
-                print "A100:{}".format(str(a100)),
+                print("A100:{}".format(str(a100)), end='')
             if rtx3090 > 0:
-                print "3090:{}".format(str(rtx3090)),
+                print("3090:{}".format(str(rtx3090)), end='')
             if rtx4090 > 0:
-                print "4090:{}".format(str(rtx4090)),
+                print("4090:{}".format(str(rtx4090)), end='')
             if ada6000 > 0:
-                print "6000:{}".format(str(ada6000)),
+                print("6000:{}".format(str(ada6000)), end='')
             if l40s > 0:
-                print "L40S:{}".format(str(l40s)),
+                print("L40S:{}".format(str(l40s)), end='')
         else:
             print("    努力！努力你就是LUMIA一哥，不努力你就是LUMIA一哥们。")
     else:

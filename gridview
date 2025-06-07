@@ -1,4 +1,4 @@
-#!/bin/python
+#!/bin/python3
 # -*- coding: utf-8 -*-
 import curses
 import time
@@ -15,9 +15,13 @@ def get_node_number():
     stdout, stderr = process.communicate()
 
     if process.returncode == 0:
-        return len(stdout.decode().splitlines())
+        data = stdout.decode().splitlines()
+        node_number = len(data)
+        nodename_list = [re.search(r'NodeName=(\S+)', line).group(1) for line in data]
+        nodename_list = [name[4:] if 'node' in name else name[0] for name in nodename_list]
+        return node_number, nodename_list
     else:
-        return 0
+        return 0, []
 
 
 def print_time(stdscr):
@@ -48,16 +52,24 @@ def get_savai():
                 if match:
                     cpu, mem, mem_unit, gpu = match.groups()
                     result[-1]['cfg']['cpu'] = int(cpu)
-                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)/10
+                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
                     mem_value -= 10
                     result[-1]['cfg']['mem'] = mem_value
                     result[-1]['cfg']['gpu'] = int(gpu)
+                else:
+                    cfg_cpu_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),billing=\d+')
+                    match = cfg_cpu_pattern.match(line)
+                    if match:
+                        cpu, mem, mem_unit = match.groups()
+                        result[-1]['cfg']['cpu'] = int(cpu)
+                        mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
+                        result[-1]['cfg']['mem'] = mem_value
             elif 'AllocTRES' in line:
                 match = alloc_pattern.match(line)
                 if match:
                     cpu, mem, mem_unit, gpu = match.groups()
                     result[-1]['alloc']['cpu'] = int(cpu)
-                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)/10
+                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
                     result[-1]['alloc']['mem'] = mem_value
                     result[-1]['alloc']['gpu'] = int(gpu)
                 else:
@@ -66,7 +78,7 @@ def get_savai():
                     if match:
                         cpu, mem, mem_unit = match.groups()
                         result[-1]['alloc']['cpu'] = int(cpu)
-                        mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)/10
+                        mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
                         result[-1]['alloc']['mem'] = mem_value
             elif 'NodeName' in line:
                 match = node_pattern.match(line)
@@ -83,11 +95,11 @@ def get_savai():
         return stderr.decode('utf-8')
 
 
-def print_node_name(stdscr, node_number):
+def print_node_name(stdscr, nodename_list):
     height, width = stdscr.getmaxyx()
-    for i in range(1, node_number+1):
+    for i in range(1, len(nodename_list)+1):
         if i < height:
-            stdscr.addstr(i, 0, "{}".format(i), curses.color_pair(6))
+            stdscr.addstr(i, 0, nodename_list[i-1], curses.color_pair(6))
 
 
 def print_node_resource_err(stdscr, result, start_y=3):
@@ -127,7 +139,7 @@ def get_alloc_logo(alloc, all):
 
 
 def get_partition_order(x):
-    partition_order = {"A100":0, "RTX3090":1, "RTX4090":2, "ADA6000":3}
+    partition_order = {"cpu":0, "A100":1, "RTX3090":2, "RTX4090":3, "ADA6000":4, "L40S":5}
     return partition_order.get(x, 99)
 
 
@@ -221,6 +233,8 @@ def print_node_resource_gpu(stdscr, result, start_y, full=False):
             alloc_gpu = result[idx]['alloc']['gpu']
             all_gpu = result[idx]['cfg']['gpu']
             color = get_alloc_color(alloc_gpu, all_gpu)
+            if all_gpu == 0:
+                continue
             # stdscr.addstr(start_x + idx, start_y, "[", curses.color_pair(1))
             # stdscr.addstr(start_x + idx, start_y+1, "■"*alloc_gpu+"□"*(all_gpu-alloc_gpu), curses.color_pair(1))
             # stdscr.addstr(start_x + idx, start_y+1+9, str(alloc_gpu), curses.color_pair(color))
@@ -236,6 +250,9 @@ def print_node_resource_gpu(stdscr, result, start_y, full=False):
                 break
             alloc_gpu = result[idx]['alloc']['gpu']
             all_gpu = result[idx]['cfg']['gpu']
+            if all_gpu == 0:
+                all_gpu = '-'
+                alloc_gpu = '-'
             color = get_alloc_color(alloc_gpu, all_gpu)
             stdscr.addstr(start_x + idx, start_y, str(alloc_gpu), curses.color_pair(color))
             stdscr.addstr(start_x + idx, start_y+1, "/{}".format(str(all_gpu)), curses.color_pair(1))
@@ -247,9 +264,9 @@ def print_node_resource_mem(stdscr, result, start_y, full=False):
     height, width = stdscr.getmaxyx()
     if start_y >= width:
         return start_y+1
-    # length: 4/20
+    # length: 4/26
     start_x = 1
-    full = full and width > 2*(start_y+20+1)
+    full = full and width > 2*(start_y+26+1)
     if full:
         # 位置充足时，输出[||||10|||| xxx/xxxG]
         for idx in range(len(result)):
@@ -258,11 +275,11 @@ def print_node_resource_mem(stdscr, result, start_y, full=False):
             alloc_mem = result[idx]['alloc']['mem']
             all_mem = result[idx]['cfg']['mem']
             color = get_alloc_color(alloc_mem, all_mem)
-            count = int(1.0*alloc_mem/all_mem*10)
+            count = int(1.0*alloc_mem/all_mem*16)
             if alloc_mem > 0 and count == 0: count = 1
             stdscr.addstr(start_x + idx, start_y, '[', curses.color_pair(1))
             stdscr.addstr(start_x + idx, start_y+1, "|"*count, curses.color_pair(color))
-            stdscr.addstr(start_x + idx, start_y+1+10, "{:>3}/{}G]".format(str(alloc_mem), str(all_mem)), curses.color_pair(1))
+            stdscr.addstr(start_x + idx, start_y+1+16, "{:>3}/{}G]".format(str(alloc_mem), str(all_mem)), curses.color_pair(1))
             
     else:
         # 位置不足时，输出xxx%
@@ -276,7 +293,7 @@ def print_node_resource_mem(stdscr, result, start_y, full=False):
             if alloc_mem < all_mem and mem_ratio == 100: mem_ratio = ">99"
             stdscr.addstr(start_x + idx, start_y, '{:>3.3}%'.format(str(mem_ratio)), curses.color_pair(1))
 
-    return start_y+20+1 if full else start_y+4+1
+    return start_y+26+1 if full else start_y+4+1
 
 
 def print_all_job_states(stdscr, start_y):
@@ -386,24 +403,24 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
         lines = [str(line) for line in lines]
         data = [line.split('|') for line in lines][1:]
         
-        # 0-4   ACCOUNT          TRES_PER_NODE MIN_CPUS       MIN_TMP_DISK     END_TIME
-        # 5-9   FEATURES         GROUP         OVER_SUBSCRIBE JOBID            NAME
-        # 10-14 COMMENT          TIME_LIMIT    MIN_MEMORY     REQ_NODES        COMMAND
-        # 15-19 PRIORITY         QOS           REASON                          ST
-        # 20-24 USER             RESERVATION   WCKEY          EXC_NODES        NICE
-        # 25-29 S:C:T            JOBID         EXEC_HOST      CPUS             NODES
-        # 30-34 DEPENDENCY       ARRAY_JOB_ID  GROUP          SOCKETS_PER_NODE CORES_PER_SOCKET
-        # 35-39 THREADS_PER_CORE ARRAY_TASK_ID TIME_LEFT      TIME             NODELIST
-        # 40-44 CONTIGUOUS       PARTITION     PRIORITY       NODELIST(REASON) START_TIME
-        # 45-49 STATE            UID           SUBMIT_TIME    LICENSES         CORE_SPEC
-        # 50-51 SCHEDNODES       WORK_DIR
+        # 0-4   ACCOUNT       TRES_PER_NODE MIN_CPUS         MIN_TMP_DISK     END_TIME
+        # 5-9   FEATURES      GROUP         OVER_SUBSCRIBE   JOBID            NAME
+        # 10-14 COMMENT       TIME_LIMIT    MIN_MEMORY       REQ_NODES        COMMAND
+        # 15-19 PRIORITY      QOS           REASON           ST               USER
+        # 20-24 RESERVATION   WCKEY         EXC_NODES        NICE             S:C:T
+        # 25-29 JOBID         EXEC_HOST     CPUS             NODES            DEPENDENCY
+        # 30-34 ARRAY_JOB_ID  GROUP         SOCKETS_PER_NODE CORES_PER_SOCKET THREADS_PER_CORE
+        # 35-39 ARRAY_TASK_ID TIME_LEFT     TIME             NODELIST         CONTIGUOUS
+        # 40-44 PARTITION     PRIORITY      NODELIST(REASON) START_TIME       STATE
+        # 45-49 UID           SUBMIT_TIME   LICENSES         CORE_SPEC        SCHEDNODES
+        # 50    WORK_DIR
         
         # JOBID PARTITION NAME USER ST TIME TIME-LIMIT CPU MEM GPU QOS PRIORITY NODELIST(REASON)
-        # 8     41        9    20   19 38   11         28  12  1   16  42       43
+        # 8     40        9    19   18 37   11         27  12  1   16  41       42
         title_list = ['JOBID', "PARTITION", "NAME", "USER", "ST", 
                       "TIME", "TIME-LIMIT", "CPU", "MEM", "GPU", 
                       "QOS", "PRIOR", "NODELIST(REASON)"]
-        show_list = [8,41,9,20,19,38,11,28,12,1,16,42,43]
+        show_list = [8,40,9,19,18,37,11,27,12,1,16,41,42]
         # 处理MEM和GPU
         command = "squeue --Format=jobid,tres-alloc:50 --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -419,25 +436,23 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
                     elif tres_mem.endswith('M'): tres_mem = str(int(tres_mem[4:-1])//1024)
                     tres_alloc[line[0]] = tres_mem
             for idx in range(len(data)):
-                data[idx][12] = tres_alloc.get(data[idx][26], "42")
+                data[idx][12] = tres_alloc.get(data[idx][25], "42")
                 gpus = data[idx][1]
                 if gpus == 'N/A':
                     data[idx][1] = '0'
                 else:
-                    gpus = gpus.split(',')[0]
-                    data[idx][1] = gpus[4:]
+                    data[idx][1] = gpus.split(':')[-1]
         else:
             for idx in range(len(data)):
                 if data[idx][12].endswith('G'): data[idx][12] = data[idx][12][:-1]
                 elif data[idx][12].endswith('M'): data[idx][12] = str(int(data[idx][12][:-1])//1024)
                 gpus = data[idx][1]
-                gpus = gpus.split(',')[0]
-                data[idx][1] = gpus[4:]
+                data[idx][1] = gpus.split(':')[-1]
         # 对于多卡任务，cpu/mem/gpu需要乘上节点数
         for idx in range(len(data)):
-            if data[idx][29] > 1:
-                nnodes = int(data[idx][29])
-                data[idx][28] = str(int(data[idx][28]) * nnodes)
+            if int(data[idx][28]) > 1:
+                nnodes = int(data[idx][28])
+                data[idx][28] = str(int(data[idx][27]) * nnodes)
                 data[idx][12] = str(int(data[idx][12]) * nnodes)
                 data[idx][1] = str(int(data[idx][1]) * nnodes)
         # 排序
@@ -540,14 +555,14 @@ def print_keyborad_info(stdscr, start_x):
 
 def print_version_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
-    version = "By Lucky, v1.9"
+    version = "By Lucky, v2.0"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
 def gridview(stdscr):
     global DEBUG_MODE
 
-    NODES = get_node_number()
+    NODES, nodename_list = get_node_number()
     DEBUG_MODE = False
     # 取消屏幕回显
     curses.noecho()
@@ -611,7 +626,7 @@ def gridview(stdscr):
             # 时间
             print_time(win1)
             # 各节点资源占用情况
-            print_node_name(win1, NODES)
+            print_node_name(win1, nodename_list)
             result = get_savai()
             if type(result) is not list:
                 print_node_resource_err(win1, result, start_y = 3)

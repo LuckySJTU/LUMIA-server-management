@@ -1,0 +1,24 @@
+#!/bin/bash
+get_real_gpu_ids() {
+    map_file="/etc/gpu_pcie_map"
+    [ ! -f "$map_file" ] && echo "Map file not found!" && return 1
+
+    # 加载映射
+    source "$map_file"
+
+    pci_list=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader,nounits)
+    real_gpu_ids=()
+
+    while read -r pcie; do
+        pcie_clean=$(echo "$pcie" | xargs)
+        real_id="${PCIE_TO_ID[$pcie_clean]}"
+        if [ -n "$real_id" ]; then
+            real_gpu_ids+=("$real_id")
+        fi
+    done <<< "$pci_list"
+
+    export SLURM_REAL_GPUS=$(IFS=, ; echo "${real_gpu_ids[*]}")
+    echo "SLURM_REAL_GPUS=$SLURM_REAL_GPUS"
+}
+
+get_real_gpu_ids

@@ -45,8 +45,8 @@ RANDOM_MSG=${MESSAGES[$RANDOM % ${#MESSAGES[@]}]}
 # 判断是否已包含用户名
 if echo "$RANDOM_MSG" | grep -q "$DISPLAY_NAME"; then
     # 含有用户名，直接输出
-    echo -e "\n$RANDOM_MSG\n"
+    echo -e "$RANDOM_MSG"
 else
     # 没有用户名，输出中英文时间问候 + 随机消息
-    echo -e "\n$GREETING_EN, $DISPLAY_NAME.\n$RANDOM_MSG\n"
+    echo -e "$GREETING_EN, $DISPLAY_NAME.\n$RANDOM_MSG"
 fi

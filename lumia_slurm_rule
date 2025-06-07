@@ -1,4 +1,4 @@
-#!/bin/python
+#!/bin/python3
 import re
 import subprocess
 import pickle
@@ -8,14 +8,14 @@ from logging.handlers import TimedRotatingFileHandler
 
 logger = logging.getLogger('lumia_slurm_rule')
 logger.setLevel(logging.DEBUG)
-file_handler = TimedRotatingFileHandler("/opt/gridview/slurm/log/lumia_slurm_rule.log", when='midnight', interval=1, backupCount=7)
+file_handler = TimedRotatingFileHandler("/var/log/slurm/lumia_slurm_rule.log", when='midnight', interval=1, backupCount=7)
 file_handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 def extract_job_info():
-    command = "/opt/gridview/slurm/bin/scontrol show job"
+    command = "/usr/bin/scontrol show job"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
 
@@ -101,7 +101,7 @@ def filter_jobs(job_info):
     return schedulable_jobs, terminable_jobs
 
 def get_avai_resource():
-    command = "/opt/gridview/slurm/bin/scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'"
+    command = "/usr/bin/scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
     if process.returncode == 0:
@@ -152,7 +152,7 @@ def get_avai_resource():
         return -1
 
 def get_partition():
-    command = "/opt/gridview/slurm/bin/sinfo -N"
+    command = "/usr/bin/sinfo -N"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
     if process.returncode != 0:
@@ -171,18 +171,18 @@ def get_partition():
         return partition
 
 def requeue_job(jobs):
-    with open("/opt/gridview/slurm/lumia_rule.pkl", 'rb') as f:
+    with open("/etc/slurm/lumia_rule.pkl", 'rb') as f:
         data = pickle.load(f)
     stamp = time.time()
     for job in jobs:
         data[job['userid']] = stamp
         # TODO requeu some job
-        command = "/opt/gridview/slurm/bin/scontrol requeue " + job['jobid']
+        command = "/usr/bin/scontrol requeue " + job['jobid']
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
         if process.returncode != 0:
             logger.error(stderr.decode('utf-8'))
-            command = "/opt/gridview/slurm/bin/scancel " + job['jobid']
+            command = "/usr/bin/scancel " + job['jobid']
             process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout, stderr = process.communicate()
             if process.returncode != 0:
@@ -194,7 +194,7 @@ def requeue_job(jobs):
         else:
             data[job['userid']] = stamp
             logger.warning("Job {} has been requeued".format(job['jobid']))
-    with open("/opt/gridview/slurm/lumia_rule.pkl", 'wb') as f:
+    with open("/etc/slurm/lumia_rule.pkl", 'wb') as f:
         pickle.dump(data, f, protocol=2)
     logger.info(data)
     return
@@ -258,7 +258,7 @@ def check_resources(schedulable_jobs, terminable_jobs):
             continue
 
         if len(candidate_jobs) > 1:
-            with open("/opt/gridview/slurm/lumia_rule.pkl", 'rb') as f:
+            with open("/etc/slurm/lumia_rule.pkl", 'rb') as f:
                 lately_requeue = pickle.load(f)
             late_time, late_job = time.time(), None
             for job in candidate_jobs:
