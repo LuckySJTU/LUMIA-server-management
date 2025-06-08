@@ -224,7 +224,7 @@ def print_node_resource_gpu(stdscr, result, start_y, full=False):
     # length: 3/10
     # " □ ■"
     start_x = 1
-    full = full and width > 2*(start_y+10+1)
+    full = full and width > 1.5*(start_y+10+1)
     if full:
         # 位置充足时，输出[■■■■□□□□]
         for idx in range(len(result)):
@@ -250,10 +250,11 @@ def print_node_resource_gpu(stdscr, result, start_y, full=False):
                 break
             alloc_gpu = result[idx]['alloc']['gpu']
             all_gpu = result[idx]['cfg']['gpu']
+            color = get_alloc_color(alloc_gpu, all_gpu)
             if all_gpu == 0:
                 all_gpu = '-'
                 alloc_gpu = '-'
-            color = get_alloc_color(alloc_gpu, all_gpu)
+                color = get_alloc_color(0, 8)
             stdscr.addstr(start_x + idx, start_y, str(alloc_gpu), curses.color_pair(color))
             stdscr.addstr(start_x + idx, start_y+1, "/{}".format(str(all_gpu)), curses.color_pair(1))
     
