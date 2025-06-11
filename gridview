@@ -254,7 +254,7 @@ def print_node_resource_gpu(stdscr, result, start_y, full=False):
             if all_gpu == 0:
                 all_gpu = '-'
                 alloc_gpu = '-'
-                color = get_alloc_color(0, 8)
+                color = 1
             stdscr.addstr(start_x + idx, start_y, str(alloc_gpu), curses.color_pair(color))
             stdscr.addstr(start_x + idx, start_y+1, "/{}".format(str(all_gpu)), curses.color_pair(1))
     
@@ -454,7 +454,7 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
             if int(data[idx][28]) > 1:
                 nnodes = int(data[idx][28])
                 data[idx][28] = str(int(data[idx][27]) * nnodes)
-                data[idx][12] = str(int(data[idx][12]) * nnodes)
+                data[idx][12] = str(int(float(data[idx][12]) * nnodes))
                 data[idx][1] = str(int(data[idx][1]) * nnodes)
         # 排序
         data.sort(key=get_squeue_sort_func(sort.lower()[-1]), reverse=sort.startswith('-'))

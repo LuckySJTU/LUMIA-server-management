@@ -136,15 +136,16 @@ if process.returncode == 0:
                 if 'L40S' in line:
                     l40s += 1
             if a100 > 0:
-                print("A100:{}".format(str(a100)), end='')
+                print(" A100:{}".format(str(a100)), end='')
             if rtx3090 > 0:
-                print("3090:{}".format(str(rtx3090)), end='')
+                print(" 3090:{}".format(str(rtx3090)), end='')
             if rtx4090 > 0:
-                print("4090:{}".format(str(rtx4090)), end='')
+                print(" 4090:{}".format(str(rtx4090)), end='')
             if ada6000 > 0:
-                print("6000:{}".format(str(ada6000)), end='')
+                print(" 6000:{}".format(str(ada6000)), end='')
             if l40s > 0:
-                print("L40S:{}".format(str(l40s)), end='')
+                print(" L40S:{}".format(str(l40s)), end='')
+            print('')
         else:
             print("    努力！努力你就是LUMIA一哥，不努力你就是LUMIA一哥们。")
     else:
