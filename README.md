@@ -27,6 +27,8 @@ We hope these scripts help.
 - 2025-3-25 init ddl
     - ddl is a tool to see CCF-conference ddl.
 ## gridview
+- 2025-6-17 update v2.1
+    - fix some bug
 - 2025-6-7 update v2.0. We are glad to introduce gridview v2.0.
     - update to Python3
     - add cpu node support
@@ -64,6 +66,7 @@ We hope these scripts help.
 - 2024-11-30 update to github.
 
 ## savai
+- 2025-6-17 fix some bug
 - 2025-6-7 update to Python3, add cpu node support
 - 2025-2-20 fix fractional memory bug
 - 2025-1-19 add partition-queue info

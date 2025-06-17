@@ -78,22 +78,15 @@ if process.returncode == 0:
     print(formation.format("NODENAME","CPU","MEM","GPU","STATE"))
     for res in result:
         state = res['state']
-        if '+' in state:
-            flag = state.split('+')
-            flag = flag[-1]
-        else:
-            flag = state
-        if flag == 'DOWN' or flag == 'FAIL':
-            state = Colors.MAGENTA+state+Colors.RESET
-        elif flag == 'RESUME' or flag == 'UNDRAIN':
-            state = state
-        elif flag == 'DRAIN' or flag == 'NoResp':
-            state = Colors.RED+state+Colors.RESET
-        elif flag == 'FUTURE' or flag == 'CANCEL_REBOOT':
-            state = Colors.YELLOW+state+Colors.RESET
-        elif flag == 'IDLE':
+        if 'DOWN' in state or 'FAIL' in state:
+            state = Colors.RED+"DOWN"+Colors.RESET
+        elif 'DRAIN' in state or 'NOT_RESPONDING' in state:
+            state = Colors.MAGENTA+"DRAIN"+Colors.RESET
+        elif 'RESUME' in state:
+            pass
+        elif 'IDLE' in state:
             state = Colors.GREEN+state+Colors.RESET
-        elif flag == 'ALLOCATED':
+        elif 'ALLOCATED' in state:
             state = Colors.BLUE+state+Colors.RESET
         else:
             if res['cfg']['gpu'] == 0:
@@ -110,11 +103,7 @@ if process.returncode == 0:
             res['cfg']['gpu'] = '-'
             res['alloc']['gpu'] = '-'
         print(formation.format(res['nodename'],str(res['alloc']['cpu'])+'/'+str(res['cfg']['cpu']),str(res['alloc']['mem'])+'/'+str(res['cfg']['mem'])+'G',str(res['alloc']['gpu'])+'/'+str(res['cfg']['gpu']),state))
-    # import datetime
-    # current_date = datetime.datetime.now().date()
-    # target_date = datetime.date(2024,9,17)
-    # if current_date == target_date:
-    #     print("    中秋节快乐喵~")
+
     command = "squeue --state=PD --format=%P"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()

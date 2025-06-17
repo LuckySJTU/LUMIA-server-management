@@ -342,25 +342,21 @@ def print_running_job_on_each_node(stdscr, result, start_y):
             # 输出节点状态，当节点正常(MIXED, ALLOCATED)时不输出，当节点为IDLE时输出IDLE。
             start_y_origin = start_y
             state = result[idx]['state']
-            if '+' in state:
-                flag = state.split('+')
-                flag = flag[-1]
-            else:
-                flag = state
-            if flag == 'DOWN' or flag == 'FAIL':
+            if 'DOWN' in state or 'FAIL' in state:
                 color = 13 # 白字红底
-            elif flag == 'RESUME' or flag == 'UNDRAIN' or flag == 'COMPLETING':
+            elif 'RESUME' in state or 'UNDRAIN' in state or 'COMPLETING' in state:
                 color = 10 # 黑字白底
-            elif flag == 'DRAIN' or flag == 'NoResp':
+            elif 'DRAIN' in state or 'NOT_RESPONDING' in state:
                 color = 2 # 红字黑底
-            elif flag == 'FUTURE' or flag == 'CANCEL_REBOOT':
+            elif 'FUTURE' in state or 'CANCEL_REBOOT' in state:
                 color = 5 # 黄字黑底
-            elif flag == 'IDLE':
+            elif 'IDLE' in state:
                 color = 4 # 绿字黑底
-            elif flag == 'ALLOCATED' or flag == 'MIXED':
+            elif 'ALLOCATED' in state or 'MIXED' in state:
                 color = 7 # 品红黑底
             else:
                 color = 1 # 白字黑底
+            
             if color != 7:
                 stdscr.addstr(start_x + idx, start_y, "*{}*".format(state), curses.color_pair(color))
                 start_y += len(state)+3
@@ -559,7 +555,7 @@ def print_keyborad_info(stdscr, start_x):
 
 def print_version_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
-    version = "By Lucky, v2.0"
+    version = "By Lucky, v2.1"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
