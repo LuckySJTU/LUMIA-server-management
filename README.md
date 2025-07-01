@@ -27,6 +27,10 @@ We hope these scripts help.
 - 2025-3-25 init ddl
     - ddl is a tool to see CCF-conference ddl.
 ## gridview
+- 2025-7-1 update v2.2
+    - add network speed monitor
+    - add system load monitor
+    - fix some bug
 - 2025-6-17 update v2.1
     - fix some bug
 - 2025-6-7 update v2.0. We are glad to introduce gridview v2.0.

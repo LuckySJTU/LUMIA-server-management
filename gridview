@@ -6,8 +6,8 @@ import subprocess
 import re
 import locale
 from collections import Counter
-from copy import deepcopy
 import random
+import os
 
 def get_node_number():
     command = 'scontrol show node | grep "NodeName"'
@@ -148,7 +148,20 @@ def get_nodelist_order(x):
     else: return x
 
 
+def get_job_order(x):
+    # if '_' in x:
+    #     return int(x.split('_')[0])
+    # else:
+    #     return int(x)
+    try:
+        return int(x)
+    except:
+        return int(x.split('_')[0])
+
+
 def get_second(slurm_time):
+    if slurm_time == 'UNLIMITED':
+        return 1e9
     slurm_time = slurm_time.split('-')  # 分离天数和时间部分
     if len(slurm_time)>1: days, time_part = slurm_time[0], slurm_time[1]
     else: days, time_part = 0, slurm_time[0]
@@ -178,7 +191,7 @@ def get_squeue_sort_func(key):
         return lambda x:get_nodelist_order(x[idx])
     elif key == 'j':
         # 处理jobid
-        return lambda x:int(x[idx])
+        return lambda x:get_job_order(x[idx])
     else:
         return lambda x:x[idx]
 
@@ -545,17 +558,84 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
         return None
 
 
-def print_keyborad_info(stdscr, start_x):
+# interfaces monitor and system load monitor
+def get_bytes(interfaces):
+    data = {}
+    with open('/proc/net/dev') as f:
+        for line in f:
+            line = line.strip()
+            for iface in interfaces:
+                if line.startswith(iface + ":"):
+                    parts = line.split(f"{iface}:")[1].split()
+                    recv = int(parts[0])
+                    sent = int(parts[8])
+                    data[iface] = (recv, sent)
+    return data
+
+def format_speed(bytes_per_sec):
+    # max return length: 12
+    # 最多保留两位小数，最多5位
+    # if bytes_per_sec < 100:
+    #     return f"{bytes_per_sec:>5.2f} B/s"
+    # if bytes_per_sec < 1000:
+    #     return f"{bytes_per_sec:>5.1f} B/s"
+    kb = bytes_per_sec / 1024
+    if kb < 100:
+        return f"{kb:>5.2f} KB/s"
+    if kb < 1000:
+        return f"{kb:>5.1f} KB/s"
+    mb = kb / 1024
+    if mb < 100:
+        return f"{mb:>5.2f} MB/s"
+    if mb < 1000:
+        return f"{mb:>5.1f} MB/s"
+    gb = mb / 1024
+    return f"{gb:>5.2f} GB/s"
+
+def print_web_speed(stdscr, start_x, start_y, prev_data, interface_name, interval=1):
+    curr_data = get_bytes(interface_name)
+    if prev_data is None:
+        return curr_data
+    for iface in interface_name:
+        recv_diff = curr_data[iface][0] - prev_data[iface][0]
+        sent_diff = curr_data[iface][1] - prev_data[iface][1]
+        recv_speed = recv_diff / interval
+        sent_speed = sent_diff / interval
+        speed = f"{format_speed(sent_speed)}⬆ {format_speed(recv_speed)}⬇"
+        stdscr.addstr(start_x, start_y, iface+':', curses.color_pair(4)|curses.A_BOLD)
+        start_y += len(iface) + 1
+        stdscr.addstr(start_x, start_y, speed, curses.color_pair(1))
+        start_y += len(speed) + 2
+    return curr_data
+
+
+# print system average load
+def format_sysload(load_avg):
+    if load_avg < 10:
+        return f"{load_avg:.2f}"
+    if load_avg < 100:
+        return f"{load_avg:.1f}"
+    return f"{load_avg:.0f}"
+
+def print_average_load(stdscr, start_x, start_y):
+    # length: 25
+    load_avg = os.getloadavg()
+    stdscr.addstr(start_x, start_y, "Load average:", curses.color_pair(6))
+    stdscr.addstr(start_x, start_y+13, f"{format_sysload(load_avg[0])}", curses.color_pair(1)|curses.A_BOLD)
+    stdscr.addstr(start_x, start_y+18, f"{format_sysload(load_avg[1])} {format_sysload(load_avg[2])}", curses.color_pair(6))
+
+
+def print_keyborad_info(stdscr, start_x, start_y=0):
     height, width = stdscr.getmaxyx()
-    stdscr.addstr(start_x, 0, "F10", curses.color_pair(1))
-    stdscr.addstr(start_x, 3, "Quit", curses.color_pair(10))
-    stdscr.addstr(start_x, 7, "F12", curses.color_pair(1))
-    stdscr.addstr(start_x, 10, "Debug", curses.color_pair(10))
+    stdscr.addstr(start_x, start_y+0, "F10", curses.color_pair(1))
+    stdscr.addstr(start_x, start_y+3, "Quit", curses.color_pair(10))
+    stdscr.addstr(start_x, start_y+7, "F12", curses.color_pair(1))
+    stdscr.addstr(start_x, start_y+10, "Debug", curses.color_pair(10))
 
 
 def print_version_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
-    version = "By Lucky, v2.1"
+    version = "By Lucky, v2.2"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
@@ -598,6 +678,8 @@ def gridview(stdscr):
     clear_win2 = False
     clear_win3 = False
     change_sort_flag = False
+    prev_interface_data = None, 0
+    interface_name = ["ens8f0", "ibs14"]
 
     while True:
         # 获取屏幕大小
@@ -651,9 +733,21 @@ def gridview(stdscr):
                         old_data,
                         start_x=0,
                         sort=job_sort_key, 
-                        max_line=height-1-len(result)-3,
+                        max_line=height-1-len(result)-4,
                         change_sort_flag=change_sort_flag,
                     )
+                    # 打印系统负载
+                    print_average_load(win2, start_x=win2.getmaxyx()[0]-1, start_y=0)
+                    # 打印网速
+                    prev_interface_data = print_web_speed(
+                        win2, 
+                        start_x=win2.getmaxyx()[0]-1, 
+                        start_y=1+27, 
+                        prev_data=prev_interface_data[0], 
+                        interface_name=interface_name, 
+                        interval=last_update_time-prev_interface_data[1]
+                    ), last_update_time
+
                 except curses.error:
                     clear_win2 = True
                 change_sort_flag = False
