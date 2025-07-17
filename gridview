@@ -63,6 +63,7 @@ def get_savai():
                         cpu, mem, mem_unit = match.groups()
                         result[-1]['cfg']['cpu'] = int(cpu)
                         mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
+                        mem_value -= 128
                         result[-1]['cfg']['mem'] = mem_value
             elif 'AllocTRES' in line:
                 match = alloc_pattern.match(line)
