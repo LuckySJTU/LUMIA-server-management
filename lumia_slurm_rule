@@ -46,12 +46,12 @@ def extract_job_info():
         tres_match = tres_pattern.search(job)
         req_exc_node_match = req_exc_node_pattern.search(job)
 
-        if jobid_match and userid_match and priority_match and jobstate_match and nodelist_match and partition_match and tres_match:
+        if jobid_match and userid_match and priority_match and jobstate_match and partition_match and tres_match:
             jobid = jobid_match.group(1)
             userid = userid_match.group(1)
             priority = int(priority_match.group(1))
             jobstate = jobstate_match.group(1)
-            nodelist = nodelist_match.group(1)
+            nodelist = nodelist_match.group(1) if nodelist_match else ''
             partition = partition_match.group(1).split(',')
             cpu = int(tres_match.group(1))
             mem = int(tres_match.group(2)) * (1024 if tres_match.group(3) == 'G' else 1)
@@ -111,7 +111,7 @@ def get_avai_resource():
         result = {}
 
         node_pattern = re.compile(r'NodeName=(\w+)')
-        state_pattern = re.compile(r'   State=(\w+)')
+        state_pattern = re.compile(r'   State=([\w\+]+)')
         cfg_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+)([MG]),billing=\d+,gres/gpu=(\d+)')
         alloc_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+)([MG]),gres/gpu=(\d+)')
 
