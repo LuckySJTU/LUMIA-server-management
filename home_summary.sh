@@ -1,15 +1,16 @@
 #!/bin/env bash
 # 统计 /home 下每个用户目录的大小，并按大小降序排序。
-# 用法： ./home_summary.sh [并行任务数]
+# 用法： ./home_summary.sh [并行任务数] [根目录]
 
 # 并行任务数，默认为 CPU 核心数
 PARALLEL=${1:-$(nproc)}
+ROOT_DIR=${2:-/home/}
 
 # 如果 /home 不存在或没有子目录，直接退出
 shopt -s nullglob
-dirs=(/home/*)
+dirs=(${ROOT_DIR}*)
 if [ ${#dirs[@]} -eq 0 ]; then
-  echo "/home 下没有任何子目录，退出"
+  echo "$ROOT_DIR 下没有任何子目录，退出"
   exit 1
 fi
 
