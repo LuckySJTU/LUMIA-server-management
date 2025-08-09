@@ -18,3 +18,6 @@ fi
 printf '%s\0' "${dirs[@]}" | \
   xargs -0 -n1 -P"$PARALLEL" du -sh 2>/dev/null | \
   sort -hr
+
+# 打印当前时间
+echo "统计时间：$(date '+%Y-%m-%d %H:%M:%S')"
