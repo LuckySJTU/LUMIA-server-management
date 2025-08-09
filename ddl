@@ -86,7 +86,7 @@ def main(args):
             with open('/opt/ddl/avai_conf.yaml', 'r', encoding='utf-8') as f:
                 output_data = yaml.safe_load(f)
     else:
-        print(printc('没有可用的ddl信息，请检查crontab中/opt/ddl/bin/ddl_get_data是否正常运行', fg='red'))
+        print(printc('没有可用的ddl信息，请检查crontab中/opt/ddl/ddl_get_data是否正常运行', fg='red'))
         return
 
     now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
@@ -136,7 +136,7 @@ def main(args):
                 11,
             ]
             formation = ("{{:<{}}} "*3 + "{{:<{}}}").format(*align_length)
-            print(formation.format('CONFERENCE', 'CCF', 'DDL(TIMEZONE)', 'TIMELEFT'))
+            print(printc(formation.format('CONFERENCE', 'CCF', 'DDL(TIMEZONE)', 'TIMELEFT'), fg='cyan', bold=True))
             for line in output_str:
                 print(formation.format(*line))
     else:
