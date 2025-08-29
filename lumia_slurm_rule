@@ -86,7 +86,7 @@ def filter_jobs(job_info):
 
     for userid, jobs in job_info.items():
         running_jobs = [job for job in jobs if job['jobstate'] == 'RUNNING']
-
+        # running_jobs = [job for job in jobs if job['jobstate'] == 'RUNNING' and 'cpu' not in job['partition']]
         for job in jobs:
             if 'debug' in job['partition'] or 'cpu' in job['partition']:
                 continue
