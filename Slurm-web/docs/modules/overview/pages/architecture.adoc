@@ -1,0 +1,155 @@
+= Architecture
+:figure-caption!:
+:slurmrestd-release-notes: https://slurm.schedmd.com/openapi_release_notes.html
+
+== Components
+
+This diagram represents all Slurm-web components with their respective roles and
+integration with Slurm workload manager:
+
+.Slurm-web architecture with components roles [xref:image$arch/slurm-web_architecture.svg[icon:download[] SVG]]
+image::arch/slurm-web_architecture.png[]
+
+Slurm-web is based on 3 components:
+
+* *agent*: Sends requests to Slurm `slurmrestd` service which exposes a REST
+  API for `slurmctld` and `slurmdbd` daemons. The _agent_ is also in charge of
+  the _authorizations_ enforcement and acts as a _caching_ layer over Slurm.
+* *gateway*: Performs _user authentication_ and acts as a _reserve proxy_ for
+  the _agents_.
+* *frontend*: The _representation layer_ for the user interface. It is actually
+  served by the _gateway_ application and executed on client side in web
+  browsers.
+
+[sidebar]
+--
+.More links
+* https://slurm.schedmd.com/rest_quickstart.html[Slurm REST API Quick Start Guide]
+* https://slurm.schedmd.com/rest.html[Slurm REST API Reference]
+* https://slurm.schedmd.com/rest_api.html[Slurm REST API implementation details]
+--
+
+== Integration
+
+In addition to Slurm workload manager, Slurm-web interacts with some other
+external services and data sources:
+
+.Slurm-web integration with external components [xref:image$arch/slurm-web_integration.svg[icon:download[] SVG]]
+image::arch/slurm-web_integration.png[]
+
+The *gateway* component authenticates users with an entreprise LDAP
+directory. Slurm-web supports all major LDAP services implementation such as
+OpenLDAP, FreeIPA and Active Directory with legacy NIS and RFC 2307 bis schemas.
+
+The *agent* component reads the
+xref:conf:policy.adoc[RBAC autorization policy] from a plain INI file with
+permissions associated to roles and LDAP groups.
+
+Optionally, the *agent* can also:
+
+- Extract cluster racking topology from
+  xref:racksdb:overview:start.adoc[RacksDB] database to generate
+  xref:overview.adoc#nodes-status[interactive graphical representation of nodes status]
+  in the racks.
+- Connect to https://redis.io/[Redis] in-memory key/value database to
+  xref:overview.adoc#cache[save cached data] from Slurm.
+- Integrate with https://prometheus.io/[Prometheus] (or compatible) by exporting
+  xref:overview.adoc#metrics[various Slurm metrics] for storage in timeseries
+  database. The agent can then query this database to get historical values of
+  these metrics.
+
+[#protocols]
+== Protocols
+
+Protocols and authentication realms involved in communications between Slurm-web
+and Slurm components are represented in this diagram:
+
+.Protocols in communication between Slurm-web components [xref:image$arch/slurm-web_protocols.svg[icon:download[] SVG]]
+image::arch/slurm-web_protocols.png[]
+
+All communications from the clients web browsers to Slurm-web *agent*
+component are performed with HTTP over TCP/IP network protocols. These
+network communications can be secured with SSL/TLS (aka. HTTPS) over standard
+port TCP/443 with a xref:conf:wsgi/index.adoc[production HTTP server]. After
+initial authentication with LDAP directory, users are authenticated between
+these components with https://jwt.io/[JSON Web Token] (JWT). Slurm-web has its
+own JWT realm, with its dedicated JWT signing key, to secure communication
+between its components.
+
+Slurm `slurmrestd` supports incoming HTTP requests on:
+
+* *TCP/IP socket*, with `rest_auth/jwt` authentication and tokens signed by
+  Slurm JWT signing key.
+* *Unix socket*, with two authentication methods: `rest_auth/jwt` and
+  `rest_auth/local` _(deprecated)_ in which `slurmrestd` authenticates users
+  with client process UID/GID.
+
+Slurm-web *agent* supports all these combinations of sockets and authentication
+methods. Please refer to
+xref:conf:slurmrestd.adoc[slurmrestd access configuration page] for more
+details.
+
+Slurm components communicates with specific binary RPC protocol over TCP/IP
+sockets, secured by either https://dun.github.io/munge/[Munge] or
+https://slurm.schedmd.com/authentication.html#slurm[Slurm internal mechanism].
+When JWT authentication is used between Slurm-web *agent* and Slurm `slurmrestd`
+service, the `auth/jwt` alternative authentication type must also be enabled in
+main Slurm and `slurmdbd` configuration.
+
+[#multiclusters]
+== Multi-clusters Distribution
+
+Slurm-web is designed to support natively multiple HPC clusters with a central
+dashboard. In this configuration, the components are distributed as represented
+in this diagram:
+
+.Slurm-web distribution on multiple clusters [xref:image$arch/slurm-web_distribution.svg[icon:download[] SVG]]
+image::arch/slurm-web_distribution.png[]
+
+In this configuration, the *agent* component must be deployed on all clusters
+collocated with Slurm `slurmrestd` daemon. An *agent* interacts with only one
+Slurm cluster.
+
+The *gateway* can be installed on a central server. It distributes the requests
+to the *agents* deployed on the clusters.
+
+[#slurm-versions]
+== Slurm REST API versions
+
+Slurm-web {version} is officially tested and supported with Slurm REST API
+*v{api_version}*. This version of Slurm REST API is available in Slurm 24.05,
+24.11 and 25.05.
+
+This table represents all Slurm REST API versions supported by the latest Slurm
+releases:
+
+.REST API versions by Slurm releases
+[cols="2,1,1,1"]
+|===
+.2+|*Slurm releases*
+3+^|*Supported API versions*
+
+|*Latest*
+|*Compatible*
+|*Deprecated*
+
+|23.11
+|0.0.40
+|0.0.39
+|0.0.38
+
+|24.05
+|*0.0.41*
+|0.0.40
+|0.0.39
+
+|24.11
+|0.0.42
+|*0.0.41*
+|0.0.40
+
+|25.05
+|0.0.43
+|0.0.42
+|*0.0.41*
+|===

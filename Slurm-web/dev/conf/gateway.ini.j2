@@ -1,0 +1,32 @@
+[service]
+cors=yes
+port={{ service_port }}
+
+[ui]
+host=http://localhost:{{ service_port }}
+{%- if ui is defined and ui %}
+path={{ ui }}
+{%- else %}
+enabled=no
+{%- endif %}
+templates=conf/vendor/templates
+message_login={{ message }}
+
+[agents]
+url =
+{%- for agent in agents %}
+  http://localhost:{{ agent.service_port }}
+{%- endfor %}
+
+[jwt]
+key={{ jwt_key }}
+
+{%- if not anonymous %}
+[authentication]
+enabled=yes
+
+[ldap]
+uri=ldap://localhost:{{ ldap_port }}
+user_base=ou=people,dc=cluster,dc={{ ldap_base }}
+group_base=ou=groups,dc=cluster,dc={{ ldap_base }}
+{%- endif %}

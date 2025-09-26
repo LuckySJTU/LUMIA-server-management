@@ -1,0 +1,225 @@
+= Metrics
+
+Slurm-web can be integrated with https://prometheus.io/[Prometheus] (or any
+compatible solution) to manage Slurm metrics.
+
+image::overview:slurm-web_metrics.png[]
+
+When this feature is enabled, Slurm-web agent exports these metrics in standard
+OpenMetrics format on `/metrics` endpoint. This is designed to be collected by
+Prometheus (or compatible) in order to store these metrics in timeseries
+database. The agent can then query this database, so the frontend can produce
+charts with historical values.
+
+This first section explains how to <<start,enable this metrics feature>>. For
+security reasons, access to exported metrics can be
+<<restrict,restricted to specific hosts>>. Next section explains how to
+<<prometheus,configure Prometheus>> to collect Slurm-web metrics. Then
+<<query,metrics query settings>> are explained and the last section provides a
+<<reference,reference list of all available metrics>>.
+
+[#start]
+== Get Started
+
+The metrics feature is disabled by default. It can be enabled with the following
+lines in [.path]#`/etc/slurm-web/agent.ini`#:
+
+[source,ini]
+----
+[metrics]
+enabled=yes
+----
+
+.More details
+****
+* xref:conf/agent.adoc#_metrics[Agent configuration metrics section reference documentation].
+****
+
+[#restrict]
+== Access Restriction
+
+For security reasons, Slurm-web agent restricts access to `/metrics` endpoint to
+localhost only. When Prometheus is running on external hosts, you must define
+`restrict` parameter in [.path]#`/etc/slurm-web/agent.ini`# to allow other
+networks explicitely. For example:
+
+[source,ini]
+----
+[metrics]
+enabled=yes
+restrict=
+  192.168.1.0/24
+  10.0.0.251/32
+----
+
+In this example, all IP addresses in range `192.168.1.[0-254]` and `10.0.0.251`
+are permitted to request metrics.
+
+.More details
+****
+* xref:conf/agent.adoc#_metrics[Agent configuration reference documentation for metrics section].
+****
+
+[#prometheus]
+== Prometheus Integration
+
+Prometheus must be configured to request `/metrics` endpoint of Slurm-web agent.
+Edit [.path]#`/etc/prometheus/prometheus.yml`# to add one of the following
+configuration snippets depending of your setup:
+
+* Slurm-web agent running as native service (ie. with
+`slurm-web-agent.service`):
+
+[source,yaml]
+----
+scrape_configs:
+  - job_name: slurm
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['localhost:5012']
+----
+
+* Slurm-web agent running on xref:wsgi/index.adoc[production HTTP server]:
+
+[source,yaml]
+----
+scrape_configs:
+  - job_name: slurm
+    scrape_interval: 30s
+    metrics_path: /agent/metrics
+    static_configs:
+      - targets: ['localhost:80']
+----
+
+NOTE: You may need to adjust the target hostname, typically if Prometheus is
+running on a remote host, and destination port (for example 443 for HTTPS).
+
+Check prometheus the scraping job is running properly with this command:
+
+[source,console]
+----
+$ curl -s http://localhost:9090/api/v1/targets?scrapePool=slurm | jq
+----
+
+This command reports the status of the Prometheus scraping job, for example:
+
+[source,json]
+----
+{
+  "status": "success",
+  "data": {
+    "activeTargets": [
+      {
+        "discoveredLabels": {
+          "__address__": "localhost:80",
+          "__metrics_path__": "/agent/metrics",
+          "__scheme__": "http",
+          "__scrape_interval__": "30s",
+          "__scrape_timeout__": "10s",
+          "job": "slurm"
+        },
+        "labels": {
+          "instance": "localhost:80",
+          "job": "slurm"
+        },
+        "scrapePool": "slurm",
+        "scrapeUrl": "http://localhost:80/agent/metrics",
+        "globalUrl": "http://localhost:80/agent/metrics",
+        "lastError": "", <1>
+        "lastScrape": "2024-10-30T12:08:41.494167925+01:00",
+        "lastScrapeDuration": 0.107884764,
+        "health": "up", <2>
+        "scrapeInterval": "30s",
+        "scrapeTimeout": "10s"
+      }
+    ],
+    "droppedTargets": []
+  }
+}
+----
+<1> `lastError` field must be empty.
+<2> `health` must be `up`.
+
+.Reference
+****
+* https://prometheus.io/docs/prometheus/latest/configuration/configuration/[Prometheus Official Configuration Documentation].
+****
+
+[#query]
+== Query Settings
+
+In order to query Prometheus database, Slurm-web must know:
+
+* The *URL* to access Prometheus HTTP API,
+* The name of Prometheus *job* that scrapes Slurm-web metrics. This corresponds
+  to `job_name` field in [.path]#`/etc/prometheus/prometheus.yml`#.
+
+By default, Slurm-web uses `http://localhost:9090` and `slurm` values
+respectively. This can be changed with the following settings in
+[.path]#`/etc/slurm-web/agent.ini`#, for example:
+
+[source,ini]
+----
+[metrics]
+enabled=yes
+host=https://metrics.company.ltd
+job=slurmweb
+----
+
+.More details
+****
+* xref:conf/agent.adoc#_metrics[Agent configuration reference documentation for metrics section].
+****
+
+[#reference]
+== Available Metrics
+
+This table describes all metrics exported by Slurm-web:
+
+[cols="1l,3a"]
+|===
+|Metric|Description
+
+|slurm_nodes[state]
+|Number of compute nodes in a given state. Supported states are: _idle_,
+_mixed_, _allocated_, _down_, _drain_ and _unknown_.
+
+|slurm_nodes_total
+|Total number of compute nodes managed by Slurm.
+
+|slurm_cores[state]
+|Number of cores of compute nodes in a given state. Supported states are:
+_idle_, _mixed_, _allocated_, _down_, _drain_ and _unknown_.
+
+|slurm_cores_total
+|Total number of cores on compute nodes managed by Slurm.
+
+|slurm_gpus[state]
+|Number of GPU of compute nodes in a given state. Supported states are: _idle_,
+_allocated_, _down_, _drain_ and _unknown_.
+
+|slurm_gpus_total
+|Total number of GPU on compute nodes managed by Slurm.
+
+|slurm_jobs[state]
+|Number of jobs in a given state in Slurm controller queue.  Supported states
+are: _running_, _completed_, _completing_, _cancelled_, _pending_ and _unknown_.
+
+|slurm_jobs_total
+|Total number of jobs in Slurm controller queue.
+
+|slurmweb_cache_hit[key]
+|Number of cache hit per cache key.
+
+|slurmweb_cache_miss[key]
+|Number of cache miss per cache key.
+
+|slurmweb_cache_hit_total
+|Total number of cache hits.
+
+|slurmweb_cache_miss_total
+|Total number of cache misses.
+|===
+
+TIP: Do want more Slurm metrics exported by Slurm-web?
+https://rackslab.io/en/contact/[Contact us] to tell your needs.

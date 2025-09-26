@@ -1,0 +1,30 @@
+{
+  "nodes-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "cores-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "gpus-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "jobs-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "unknown-metric": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "unknown-path": {
+    "content-type": "application/json",
+    "status": 400
+  },
+  "cache-hour": {
+    "content-type": "application/json",
+    "status": 200
+  }
+}

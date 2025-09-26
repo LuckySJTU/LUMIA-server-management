@@ -1,0 +1,10 @@
+[
+  {
+    "name": "normal",
+    "node_sets": ""
+  },
+  {
+    "name": "gpu",
+    "node_sets": ""
+  }
+]

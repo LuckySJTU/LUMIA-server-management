@@ -1,0 +1,14 @@
+{
+  "actions": [
+    "view-qos",
+    "view-nodes",
+    "view-partitions",
+    "view-accounts",
+    "view-reservations",
+    "view-jobs",
+    "view-stats"
+  ],
+  "roles": [
+    "admin"
+  ]
+}

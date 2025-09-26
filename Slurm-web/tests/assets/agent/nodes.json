@@ -1,0 +1,112 @@
+[
+  {
+    "alloc_cpus": 63,
+    "alloc_idle_cpus": 1,
+    "cores": 32,
+    "cpus": 64,
+    "gres": "",
+    "gres_used": "",
+    "name": "cn1",
+    "partitions": [
+      "normal"
+    ],
+    "real_memory": 131072,
+    "reason": "",
+    "sockets": 2,
+    "state": [
+      "MIXED"
+    ]
+  },
+  {
+    "alloc_cpus": 51,
+    "alloc_idle_cpus": 13,
+    "cores": 32,
+    "cpus": 64,
+    "gres": "",
+    "gres_used": "",
+    "name": "cn2",
+    "partitions": [
+      "normal"
+    ],
+    "real_memory": 131072,
+    "reason": "",
+    "sockets": 2,
+    "state": [
+      "MIXED",
+      "PLANNED"
+    ]
+  },
+  {
+    "alloc_cpus": 0,
+    "alloc_idle_cpus": 64,
+    "cores": 32,
+    "cpus": 64,
+    "gres": "",
+    "gres_used": "",
+    "name": "cn3",
+    "partitions": [
+      "normal"
+    ],
+    "real_memory": 131072,
+    "reason": "ECC memory error",
+    "sockets": 2,
+    "state": [
+      "IDLE",
+      "DRAIN"
+    ]
+  },
+  {
+    "alloc_cpus": 0,
+    "alloc_idle_cpus": 64,
+    "cores": 32,
+    "cpus": 64,
+    "gres": "",
+    "gres_used": "",
+    "name": "cn4",
+    "partitions": [
+      "normal"
+    ],
+    "real_memory": 131072,
+    "reason": "CPU dead",
+    "sockets": 2,
+    "state": [
+      "DOWN"
+    ]
+  },
+  {
+    "alloc_cpus": 0,
+    "alloc_idle_cpus": 32,
+    "cores": 16,
+    "cpus": 32,
+    "gres": "gpu:h100:4",
+    "gres_used": "gpu:h100:0(IDX:N/A)",
+    "name": "gpu1",
+    "partitions": [
+      "gpu"
+    ],
+    "real_memory": 524288,
+    "reason": "",
+    "sockets": 2,
+    "state": [
+      "IDLE"
+    ]
+  },
+  {
+    "alloc_cpus": 0,
+    "alloc_idle_cpus": 32,
+    "cores": 16,
+    "cpus": 32,
+    "gres": "gpu:h100:4",
+    "gres_used": "gpu:h100:0(IDX:N/A)",
+    "name": "gpu2",
+    "partitions": [
+      "gpu"
+    ],
+    "real_memory": 524288,
+    "reason": "",
+    "sockets": 2,
+    "state": [
+      "IDLE"
+    ]
+  }
+]

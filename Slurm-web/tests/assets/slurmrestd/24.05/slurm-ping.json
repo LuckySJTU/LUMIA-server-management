@@ -1,0 +1,35 @@
+{
+  "pings": [
+    {
+      "hostname": "admin.emulator",
+      "pinged": "UP",
+      "latency": 1060,
+      "mode": "primary"
+    }
+  ],
+  "meta": {
+    "plugin": {
+      "type": "openapi/slurmctld",
+      "name": "Slurm OpenAPI slurmctld",
+      "data_parser": "data_parser/v0.0.41",
+      "accounting_storage": "accounting_storage/slurmdbd"
+    },
+    "client": {
+      "source": "/run/slurmrestd/slurmrestd.socket->socket:[2485995911] (fd 8)",
+      "user": "root",
+      "group": "root"
+    },
+    "command": [],
+    "slurm": {
+      "version": {
+        "major": "24",
+        "micro": "3",
+        "minor": "05"
+      },
+      "release": "24.05.3",
+      "cluster": "hpc"
+    }
+  },
+  "errors": [],
+  "warnings": []
+}

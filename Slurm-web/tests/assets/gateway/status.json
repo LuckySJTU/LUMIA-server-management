@@ -1,0 +1,190 @@
+{
+  "accounts": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "cache-stats": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "clusters": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-archived": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-completed": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-failed": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-archived": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-completed": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-gres": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-multi-nodes": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-multi-types": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-pending": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-per-node": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-per-socket": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-per-task": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-running": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-gpus-type": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-pending": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-running": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "job-timeout": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "jobs": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "jobs-node": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "message_login": {
+    "content-type": "text/html; charset=utf-8",
+    "status": 200
+  },
+  "metrics-cache-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "metrics-cores-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "metrics-jobs-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "metrics-nodes-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-allocated": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-down": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-drain": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-idle": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-mixed": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-planned": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-with-gpus-allocated": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-with-gpus-idle": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-with-gpus-mixed": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-with-gpus-model-allocated": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-with-gpus-model-idle": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-with-gpus-model-mixed": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "node-without-gpu": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "nodes": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "partitions": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "qos": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "racksdb-draw-coordinates": {
+    "content-type": "multipart/form-data; boundary=f4a560fe88f04e8f89a1f9428fda1c9b",
+    "status": 200
+  },
+  "reservations": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "stats": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "users": {
+    "content-type": "application/json",
+    "status": 200
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "jobs": [],
+  "meta": {
+    "plugin": {
+      "type": "openapi/slurmdbd",
+      "name": "Slurm OpenAPI slurmdbd",
+      "data_parser": "data_parser/v0.0.41",
+      "accounting_storage": "accounting_storage/slurmdbd"
+    },
+    "client": {
+      "source": "unix:/run/slurmrestd/slurmrestd.socket(fd:20)",
+      "user": "",
+      "group": ""
+    },
+    "command": [],
+    "slurm": {
+      "version": {
+        "major": "24",
+        "micro": "5",
+        "minor": "11"
+      },
+      "release": "24.11.5",
+      "cluster": "hpc"
+    }
+  },
+  "errors": [],
+  "warnings": [
+    {
+      "description": "slurmdb_jobs_get(0x7f6e1001f460) found nothing",
+      "source": "_dump_jobs"
+    }
+  ]
+}

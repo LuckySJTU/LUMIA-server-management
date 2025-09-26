@@ -1,0 +1,62 @@
+{
+  "accounts": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "cache-stats": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "info": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "jobs": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "jobs-node": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "metrics-cache-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "metrics-cores-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "metrics-jobs-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "metrics-nodes-hour": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "nodes": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "partitions": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "permissions": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "qos": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "reservations": {
+    "content-type": "application/json",
+    "status": 200
+  },
+  "stats": {
+    "content-type": "application/json",
+    "status": 200
+  }
+}

@@ -1,0 +1,52 @@
+[service]
+cluster={{ cluster_name }}
+cors=yes
+port={{ service_port }}
+
+[jwt]
+key={{ jwt_key }}
+
+[slurmrestd]
+uri={{ slurmrestd_uri }}
+{% if slurmrestd_auth == "local" %}
+auth=local
+{% else %}
+{% if slurmrestd_jwt_mode %}
+jwt_mode={{ slurmrestd_jwt_mode }}
+{% endif %}
+jwt_user=slurm
+{% if slurmrestd_jwt_key %}
+jwt_lifespan=120
+jwt_key={{ slurmrestd_jwt_key }}
+{% endif %}
+{% if slurmrestd_token %}
+jwt_token={{ slurmrestd_token }}
+{% endif %}
+{% endif %}
+
+[policy]
+definition=conf/vendor/policy.yml
+roles={{ policy_path }}
+
+[racksdb]
+{% if cluster_name == 'pocket' %}
+enabled=no
+{% endif %}
+db=dev/firehpc/db
+schema=../RacksDB/schemas/racksdb.yml
+drawings_schema=../RacksDB/schemas/drawings.yml
+tags=compute
+{% if infrastructure %}
+infrastructure={{ infrastructure }}
+{% endif %}
+
+[cache]
+enabled={{ cache_enabled }}
+port={{ redis_port }}
+password={{ redis_password }}
+
+{% if cluster_name != "pocket" %}
+[metrics]
+enabled=yes
+host=http://localhost:{{ prometheus_port }}
+{% endif %}

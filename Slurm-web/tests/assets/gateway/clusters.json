@@ -1,0 +1,68 @@
+[
+  {
+    "cache": true,
+    "infrastructure": "tiny",
+    "metrics": true,
+    "name": "tiny",
+    "permissions": {
+      "actions": [
+        "view-nodes",
+        "view-reservations",
+        "view-accounts",
+        "view-cache",
+        "view-stats",
+        "view-jobs",
+        "view-qos",
+        "view-partitions"
+      ],
+      "roles": [
+        "admin"
+      ]
+    },
+    "racksdb": true
+  },
+  {
+    "cache": true,
+    "infrastructure": "emulator",
+    "metrics": true,
+    "name": "atlas",
+    "permissions": {
+      "actions": [
+        "view-partitions",
+        "view-qos",
+        "view-reservations",
+        "view-cache",
+        "view-jobs",
+        "view-stats",
+        "view-accounts",
+        "view-nodes"
+      ],
+      "roles": [
+        "admin"
+      ]
+    },
+    "racksdb": true
+  },
+  {
+    "cache": true,
+    "infrastructure": "pocket",
+    "metrics": false,
+    "name": "pocket",
+    "permissions": {
+      "actions": [
+        "view-nodes",
+        "view-qos",
+        "view-stats",
+        "view-cache",
+        "view-jobs",
+        "view-partitions",
+        "view-reservations",
+        "view-accounts"
+      ],
+      "roles": [
+        "admin"
+      ]
+    },
+    "racksdb": false
+  }
+]

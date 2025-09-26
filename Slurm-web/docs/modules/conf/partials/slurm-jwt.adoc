@@ -1,0 +1,33 @@
+Generate random Slurm JWT signing key with restrictive permissions:
+
+[source,console]
+----
+# dd if=/dev/random of=/var/spool/slurm/jwt_hs256.key bs=32 count=1
+# chown slurm:slurm /var/spool/slurm/jwt_hs256.key
+# chmod 0600 /var/spool/slurm/jwt_hs256.key
+----
+
+Edit main Slurm and SlurmDBD configuration to enable JWT alternative
+authentication:
+
+[source,ini]
+----
+AuthAltTypes=auth/jwt
+AuthAltParameters=jwt_key=/var/spool/slurm/jwt_hs256.key
+----
+
+Restart `slurmctld` and `slurmdbd` services to update configuration:
+
+[source,console]
+----
+# systemctl restart slurmctld slurmdbd
+----
+
+:slurm-jwt: https://slurm.schedmd.com/jwt.html
+
+[sidebar]
+--
+.More links
+* {slurm-jwt}[Official Slurm JWT authentication documentation] with more
+  details about configuration options.
+--
