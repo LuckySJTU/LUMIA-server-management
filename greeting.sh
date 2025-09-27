@@ -20,7 +20,7 @@ else
 fi
 
 # LDAP 查询 displayName
-LDAP_URI="ldap://localhost"
+LDAP_URI="ldap://192.168.102.101:389"
 BASE_DN="ou=People,dc=sugon,dc=com"
 DISPLAY_NAME=$(ldapsearch -x -LLL -H "$LDAP_URI" -b "$BASE_DN" "uid=$USERNAME" displayName 2>/dev/null | awk '/^displayName:/ { $1=""; print substr($0,2) }')
 if [ -z "$DISPLAY_NAME" ]; then
