@@ -9,19 +9,13 @@ from collections import Counter
 import random
 import os
 
-def get_node_number():
-    command = 'scontrol show node | grep "NodeName"'
-    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
+def map_resource(res, target):
+    return res['cpu'] == target[0] and res['mem'] == target[1] and res['gpu'] == target[2]
 
-    if process.returncode == 0:
-        data = stdout.decode().splitlines()
-        node_number = len(data)
-        nodename_list = [re.search(r'NodeName=(\S+)', line).group(1) for line in data]
-        nodename_list = [name[4:] if 'node' in name else name[0] for name in nodename_list]
-        return node_number, nodename_list
-    else:
-        return 0, []
+
+def get_node_number():
+    result = get_savai()
+    return len(result), [res['nodename'] for res in result]
 
 
 def print_time(stdscr):
@@ -41,7 +35,7 @@ def get_savai():
         data = stdout.decode('utf-8')
         lines = data.strip().split('\n')
         result = []
-        node_pattern = re.compile(r'NodeName=(\w+)')
+        node_pattern = re.compile(r'NodeName=([\w-]+)')
         state_pattern = re.compile(r'   State=([\w\+]+)')
         cfg_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),billing=\d+,gres/gpu=(\d+)')
         alloc_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),gres/gpu=(\d+)')
@@ -81,6 +75,15 @@ def get_savai():
                         result[-1]['alloc']['cpu'] = int(cpu)
                         mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
                         result[-1]['alloc']['mem'] = mem_value
+                    else:
+                        alloc_nomem_pattern = re.compile(r'   AllocTRES=cpu=(\d+),gres/gpu=(\d+)')
+                        match = alloc_nomem_pattern.match(line)
+                        if match:
+                            cpu, gpu = match.groups()
+                            result[-1]['alloc']['cpu'] = int(cpu)
+                            result[-1]['alloc']['mem'] = 42
+                            result[-1]['alloc']['gpu'] = int(gpu)
+
             elif 'NodeName' in line:
                 match = node_pattern.match(line)
                 if match:
@@ -91,7 +94,37 @@ def get_savai():
                 if match:
                     state = match.group(1)
                     result[-1]['state'] = state
-        return result
+        
+        # merge empty node and full node
+        empty_count = 0
+        full_count = 0
+        filter_result = []
+        for res in result:
+            state = res['state']
+            if "DOWN" in state or "FAIL" in state or "DRAIN" in state or "NOT_RESPONDING" in state:
+                filter_result.append(res)
+                continue
+            if map_resource(res['alloc'],(0,0,0)) and map_resource(res['cfg'], (128,2001,8)):
+                empty_count += 1
+            elif res['alloc']['gpu'] == 8:
+                full_count += 1
+            else:
+                filter_result.append(res)
+        if empty_count > 0:
+            filter_result.append({
+                'nodename': f"EMPTY x{empty_count}",
+                'state': 'IDLE',
+                'alloc': {"cpu":0, "mem":0, "gpu":0},
+                'cfg': {"cpu":128, "mem":2001, "gpu":8},
+            })
+        if full_count > 0:
+            filter_result.append({
+                'nodename': f"FULL x{full_count}",
+                'state': 'ALLOCATED',
+                'alloc': {"cpu":42, "mem":42, "gpu":8},
+                'cfg': {"cpu":128, "mem":2001, "gpu":8},
+            })
+        return filter_result
     else:
         return stderr.decode('utf-8')
 
@@ -176,7 +209,7 @@ def get_second(slurm_time):
 
 
 def get_squeue_sort_func(key):
-    sort_dict = {"j":8, "a":40, "e":9, "u":19, "s":18, "t":37, "l":11, "c":27, "m":12, "g":1, "q":16, "p":41, "n":42}
+    sort_dict = {"j":8, "a":41, "e":9, "u":19, "s":18, "t":37, "l":11, "c":27, "m":12, "g":1, "q":16, "p":42, "n":43}
     idx = sort_dict.get(key.lower()[-1], 8)
     if key in 'tl':
         # 处理时间格式
@@ -318,7 +351,7 @@ def print_all_job_states(stdscr, start_y):
     height, width = stdscr.getmaxyx()
     # 17
     # 获取所有状态的任务
-    command = "squeue --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO --sort=t|awk '{print $5}'"
+    command = "squeue -p plm --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO --sort=t|awk '{print $5}'"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
     if process.returncode == 0:
@@ -347,7 +380,13 @@ def print_running_job_on_each_node(stdscr, result, start_y):
     multi_node_job_counter = 0
     multi_node_job_color_list = (3, 6, 7)
     for idx, node in enumerate(nodelist):
-        command = "squeue --sort=i --Format=JobID,PriorityLong,NodeList --nodelist={}".format(node)
+        if node.startswith('EMPTY'):
+            stdscr.addstr(start_x + idx, start_y, "*IDLE*", curses.color_pair(4))
+            continue
+        if node.startswith('FULL'):
+            stdscr.addstr(start_x + idx, start_y, '*ALLOCATED*', curses.color_pair(3))
+            continue
+        command = "squeue -p plm --sort=i --Format=JobID,PriorityLong,NodeList --nodelist={}".format(node)
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
         if process.returncode == 0:
@@ -398,6 +437,8 @@ def print_running_job_on_each_node(stdscr, result, start_y):
                     extra_y += len(line[0]) + 1
                     if start_y + extra_y >= width:
                         break
+            elif start_y == start_y_origin:
+                stdscr.addstr(start_x + idx, start_y, "Task not in plm.", curses.color_pair(1))
             start_y = start_y_origin
         else:
             stdscr.addstr(start_x + idx, start_y, stderr.decode('utf-8'), curses.color_pair(2))
@@ -408,7 +449,7 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
 
     height, width = stdscr.getmaxyx()
     clear_flag = False
-    command = "squeue --format='%all' --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
+    command = "squeue -p plm --format='%all' --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
     if process.returncode == 0:
@@ -416,27 +457,27 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
         lines = data.strip().split('\n')
         lines = [str(line) for line in lines]
         data = [line.split('|') for line in lines][1:]
-        
-        # 0-4   ACCOUNT       TRES_PER_NODE MIN_CPUS         MIN_TMP_DISK     END_TIME
-        # 5-9   FEATURES      GROUP         OVER_SUBSCRIBE   JOBID            NAME
-        # 10-14 COMMENT       TIME_LIMIT    MIN_MEMORY       REQ_NODES        COMMAND
-        # 15-19 PRIORITY      QOS           REASON           ST               USER
-        # 20-24 RESERVATION   WCKEY         EXC_NODES        NICE             S:C:T
-        # 25-29 JOBID         EXEC_HOST     CPUS             NODES            DEPENDENCY
-        # 30-34 ARRAY_JOB_ID  GROUP         SOCKETS_PER_NODE CORES_PER_SOCKET THREADS_PER_CORE
-        # 35-39 ARRAY_TASK_ID TIME_LEFT     TIME             NODELIST         CONTIGUOUS
-        # 40-44 PARTITION     PRIORITY      NODELIST(REASON) START_TIME       STATE
-        # 45-49 UID           SUBMIT_TIME   LICENSES         CORE_SPEC        SCHEDNODES
-        # 50    WORK_DIR
+
+        # 0-4   ACCOUNT          TRES_PER_NODE     MIN_CPUS       MIN_TMP_DISK     END_TIME
+        # 5-9   FEATURES         GROUP             OVER_SUBSCRIBE JOBID            NAME
+        # 10-14 COMMENT          TIME_LIMIT        MIN_MEMORY     REQ_NODES        COMMAND
+        # 15-19 PRIORITY         QOS               REASON                          ST
+        # 20-24 USER             RESERVATION       WCKEY          EXC_NODES        NICE
+        # 25-29 S:C:T            JOBID             EXEC_HOST      CPUS             NODES
+        # 30-34 DEPENDENCY       ARRAY_JOB_ID      GROUP          SOCKETS_PER_NODE CORES_PER_SOCKET
+        # 35-39 THREADS_PER_CORE ARRAY_TASK_ID     TIME_LEFT      TIME             NODELIST
+        # 40-44 CONTIGUOUS       VIRTUAL_PARTITION PRIORITY       NODELIST(REASON) START_TIME
+        # 45-49 STATE            UID               SUBMIT_TIME    LICENSES         CORE_SPEC
+        # 50-51 SCHEDNODES       WORK_DIR
         
         # JOBID PARTITION NAME USER ST TIME TIME-LIMIT CPU MEM GPU QOS PRIORITY NODELIST(REASON)
-        # 8     40        9    19   18 37   11         27  12  1   16  41       42
+        # 8     41        9    19   18 37   11         27  12  1   16  42       43
         title_list = ['JOBID', "PARTITION", "NAME", "USER", "ST", 
                       "TIME", "TIME-LIMIT", "CPU", "MEM", "GPU", 
                       "QOS", "PRIOR", "NODELIST(REASON)"]
-        show_list = [8,40,9,19,18,37,11,27,12,1,16,41,42]
+        show_list = [8,41,9,19,18,37,11,27,12,1,16,42,43]
         # 处理MEM和GPU
-        command = "squeue --Format=jobid,tres-alloc:50 --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
+        command = "squeue -p plm --Format=jobid,tres-alloc:50 --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
         if process.returncode == 0:
@@ -636,7 +677,7 @@ def print_keyborad_info(stdscr, start_x, start_y=0):
 
 def print_version_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
-    version = "By Lucky, v2.2"
+    version = "By Lucky, v2.2t"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
@@ -690,8 +731,8 @@ def gridview(stdscr):
             old_width = width
             # 0-NODES: 显示时间和节点信息，NODES+1空，[NODES+2, heigh-2]显示任务信息， height-1显示提示信息
             stdscr.clear()
-            win1 = curses.newwin(NODES+1, width, 0, 0)
-            win2 = curses.newwin(height-NODES-3, width, NODES+2, 0)
+            win1 = curses.newwin(height//2-1, width, 0, 0)
+            win2 = curses.newwin(height-height//2-1, width, height//2, 0)
             win2.immedok(True)
             win3 = curses.newwin(1, width, height-1, 0)
             stdscr.refresh() # 确保窗口正确初始化
@@ -709,12 +750,13 @@ def gridview(stdscr):
             # 时间
             print_time(win1)
             # 各节点资源占用情况
+            NODES, nodename_list = get_node_number()
             print_node_name(win1, nodename_list)
             result = get_savai()
             if type(result) is not list:
-                print_node_resource_err(win1, result, start_y = 3)
+                print_node_resource_err(win1, result, start_y = 24)
             else:
-                start_y = 3
+                start_y = 24
                 start_y = print_node_resource_cpu(win1, result, start_y, True)
                 start_y = print_node_resource_mem(win1, result, start_y, True)
                 start_y = print_node_resource_gpu(win1, result, start_y, True)
@@ -739,15 +781,15 @@ def gridview(stdscr):
                     )
                     # 打印系统负载
                     print_average_load(win2, start_x=win2.getmaxyx()[0]-1, start_y=0)
-                    # 打印网速
-                    prev_interface_data = print_web_speed(
-                        win2, 
-                        start_x=win2.getmaxyx()[0]-1, 
-                        start_y=1+27, 
-                        prev_data=prev_interface_data[0], 
-                        interface_name=interface_name, 
-                        interval=last_update_time-prev_interface_data[1]
-                    ), last_update_time
+                    # # 打印网速
+                    # prev_interface_data = print_web_speed(
+                    #     win2, 
+                    #     start_x=win2.getmaxyx()[0]-1, 
+                    #     start_y=1+27, 
+                    #     prev_data=prev_interface_data[0], 
+                    #     interface_name=interface_name, 
+                    #     interval=last_update_time-prev_interface_data[1]
+                    # ), last_update_time
 
                 except curses.error:
                     clear_win2 = True

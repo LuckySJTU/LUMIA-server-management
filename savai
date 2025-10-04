@@ -12,7 +12,11 @@ class Colors:
     MAGENTA = '\033[95m'
     RESET = '\033[0m'
 
-command = "scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'"
+def map_resource(res, target):
+    return res['cpu'] == target[0] and res['mem'] == target[1] and res['gpu'] == target[2]
+
+
+command = "scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES|Partitions'"
 
 process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 stdout, stderr = process.communicate()
@@ -24,7 +28,8 @@ if process.returncode == 0:
 
     result = []
 
-    node_pattern = re.compile(r'NodeName=(\w+)')
+    node_pattern = re.compile(r'NodeName=([\w-]+)')
+    partition_pattern = re.compile(r'   Partitions=([\w]+)')
     state_pattern = re.compile(r'   State=([\w\+]+)')
     cfg_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),billing=\d+,gres/gpu=(\d+)')
     alloc_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),gres/gpu=(\d+)')
@@ -64,6 +69,15 @@ if process.returncode == 0:
                     result[-1]['alloc']['cpu'] = int(cpu)
                     mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
                     result[-1]['alloc']['mem'] = mem_value
+                else:
+                    alloc_nomem_pattern = re.compile(r'   AllocTRES=cpu=(\d+),gres/gpu=(\d+)')
+                    match = alloc_nomem_pattern.match(line)
+                    if match:
+                        cpu, gpu = match.groups()
+                        result[-1]['alloc']['cpu'] = int(cpu)
+                        result[-1]['alloc']['mem'] = 42
+                        result[-1]['alloc']['gpu'] = int(gpu)
+                
         elif 'NodeName' in line:
             match = node_pattern.match(line)
             if match:
@@ -74,10 +88,45 @@ if process.returncode == 0:
             if match:
                 state = match.group(1)
                 result[-1]['state'] = state
+        elif 'Partitions' in line:
+            match = partition_pattern.match(line)
+            if match:
+                partition = match.group(1)
+                result[-1]['partition'] = partition
 
-    formation = "    {:>8}{:>9}{:>10}{:>5}  {}"
+    formation = "{:>26}{:>9}{:>10}{:>5}  {}"
     print(formation.format("NODENAME","CPU","MEM","GPU","STATE"))
+    # merge empty node and full node (only GPU node)
+    empty_count = 0
+    full_count = 0
+    filter_result = []
     for res in result:
+        state = res['state']
+        if "DOWN" in state or "FAIL" in state or "DRAIN" in state or "NOT_RESPONDING" in state:
+            filter_result.append(res)
+            continue
+        if map_resource(res['alloc'],(0,0,0)) and map_resource(res['cfg'], (128,2001,8)):
+            empty_count += 1
+        elif res['alloc']['gpu'] == 8:
+            full_count += 1
+        else:
+            filter_result.append(res)
+    if empty_count > 0:
+        filter_result.append({
+            'nodename': f"EMPTY x{empty_count}",
+            'state': 'IDLE',
+            'alloc': {"cpu":0, "mem":0, "gpu":0},
+            'cfg': {"cpu":128, "mem":2001, "gpu":8},
+        })
+    if full_count > 0:
+        filter_result.append({
+            'nodename': f"FULL x{full_count}",
+            'state': 'ALLOCATED',
+            'alloc': {"cpu":42, "mem":42, "gpu":8},
+            'cfg': {"cpu":128, "mem":2001, "gpu":8},
+        })
+
+    for res in filter_result:
         state = res['state']
         if 'DOWN' in state or 'FAIL' in state:
             state = Colors.RED+"DOWN"+Colors.RESET
@@ -105,7 +154,7 @@ if process.returncode == 0:
             res['alloc']['gpu'] = '-'
         print(formation.format(res['nodename'],str(res['alloc']['cpu'])+'/'+str(res['cfg']['cpu']),str(res['alloc']['mem'])+'/'+str(res['cfg']['mem'])+'G',str(res['alloc']['gpu'])+'/'+str(res['cfg']['gpu']),state))
 
-    command = "squeue --state=PD --format=%P"
+    command = "squeue -p plm --state=PD --format=%P"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
     if process.returncode == 0:
