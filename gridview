@@ -209,7 +209,7 @@ def get_second(slurm_time):
 
 
 def get_squeue_sort_func(key):
-    sort_dict = {"j":8, "a":41, "e":9, "u":19, "s":18, "t":37, "l":11, "c":27, "m":12, "g":1, "q":16, "p":42, "n":43}
+    sort_dict = {"j":8, "a":41, "e":9, "u":20, "s":19, "t":38, "l":11, "c":28, "m":12, "g":1, "q":16, "p":42, "n":43}
     idx = sort_dict.get(key.lower()[-1], 8)
     if key in 'tl':
         # 处理时间格式
@@ -351,7 +351,7 @@ def print_all_job_states(stdscr, start_y):
     height, width = stdscr.getmaxyx()
     # 17
     # 获取所有状态的任务
-    command = "squeue -p plm --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO --sort=t|awk '{print $5}'"
+    command = "squeue -p plm --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO --sort=t|awk '{print $7}'"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
     if process.returncode == 0:
@@ -471,11 +471,11 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
         # 50-51 SCHEDNODES       WORK_DIR
         
         # JOBID PARTITION NAME USER ST TIME TIME-LIMIT CPU MEM GPU QOS PRIORITY NODELIST(REASON)
-        # 8     41        9    19   18 37   11         27  12  1   16  42       43
+        # 8     41        9    20   19 38   11         28  12  1   16  42       43
         title_list = ['JOBID', "PARTITION", "NAME", "USER", "ST", 
                       "TIME", "TIME-LIMIT", "CPU", "MEM", "GPU", 
                       "QOS", "PRIOR", "NODELIST(REASON)"]
-        show_list = [8,41,9,19,18,37,11,27,12,1,16,42,43]
+        show_list = [8,41,9,20,19,38,11,28,12,1,16,42,43]
         # 处理MEM和GPU
         command = "squeue -p plm --Format=jobid,tres-alloc:50 --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -505,9 +505,9 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
                 data[idx][1] = gpus.split(':')[-1]
         # 对于多卡任务，cpu/mem/gpu需要乘上节点数
         for idx in range(len(data)):
-            if int(data[idx][28]) > 1:
-                nnodes = int(data[idx][28])
-                data[idx][28] = str(int(data[idx][27]) * nnodes)
+            if int(data[idx][29]) > 1:
+                nnodes = int(data[idx][29])
+                data[idx][28] = str(int(data[idx][28]) * nnodes)
                 data[idx][12] = str(int(float(data[idx][12]) * nnodes))
                 data[idx][1] = str(int(data[idx][1]) * nnodes)
         # 排序
@@ -785,7 +785,7 @@ def gridview(stdscr):
                     # prev_interface_data = print_web_speed(
                     #     win2, 
                     #     start_x=win2.getmaxyx()[0]-1, 
-                    #     start_y=1+27, 
+                    #     start_y=1+28, 
                     #     prev_data=prev_interface_data[0], 
                     #     interface_name=interface_name, 
                     #     interval=last_update_time-prev_interface_data[1]
