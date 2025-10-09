@@ -13,9 +13,13 @@ def map_resource(res, target):
     return res['cpu'] == target[0] and res['mem'] == target[1] and res['gpu'] == target[2]
 
 
-def get_node_number():
+def get_node_number(max_length=None):
     result = get_savai()
-    return len(result), [res['nodename'] for res in result]
+    nnodes, nodename_list = len(result), [res['nodename'] for res in result]
+    if max_length:
+        nodename_list = nodename_list[-max_length:]
+        result = result[-max_length:]
+    return nnodes, nodename_list, result
 
 
 def print_time(stdscr):
@@ -510,6 +514,12 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
                 data[idx][28] = str(int(data[idx][28]) * nnodes)
                 data[idx][12] = str(int(float(data[idx][12]) * nnodes))
                 data[idx][1] = str(int(data[idx][1]) * nnodes)
+        # t集群上处理用户
+        for idx in range(len(data)):
+            try:
+                data[idx][20] = data[idx][9].split('_')[0]
+            except Exception as e:
+                data[idx][20] = 'zhouhan'
         # 排序
         data.sort(key=get_squeue_sort_func(sort.lower()[-1]), reverse=sort.startswith('-'))
         data = data[:max_line]
@@ -684,7 +694,7 @@ def print_version_info(stdscr, start_x):
 def gridview(stdscr):
     global DEBUG_MODE
 
-    NODES, nodename_list = get_node_number()
+    NODES, nodename_list, _ = get_node_number()
     DEBUG_MODE = False
     # 取消屏幕回显
     curses.noecho()
@@ -750,9 +760,10 @@ def gridview(stdscr):
             # 时间
             print_time(win1)
             # 各节点资源占用情况
-            NODES, nodename_list = get_node_number()
+            NODES, nodename_list, result = get_node_number(height//2-2)
             print_node_name(win1, nodename_list)
-            result = get_savai()
+            # result = get_savai()
+            # result = result[2-height//2:]
             if type(result) is not list:
                 print_node_resource_err(win1, result, start_y = 24)
             else:
