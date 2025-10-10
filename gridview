@@ -458,9 +458,14 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
     stdout, stderr = process.communicate()
     if process.returncode == 0:
         data = stdout.decode('utf-8')
-        lines = data.strip().split('\n')
+        lines = data.strip().split('\nresearch')
         lines = [str(line) for line in lines]
         data = [line.split('|') for line in lines][1:]
+        for idx in range(len(data)):
+            while len(data[idx]) > 52:
+                # merge | in command
+                data[idx][14] = data[idx][14] +'|'+ data[idx][15]
+                del data[idx][15]
 
         # 0-4   ACCOUNT          TRES_PER_NODE     MIN_CPUS       MIN_TMP_DISK     END_TIME
         # 5-9   FEATURES         GROUP             OVER_SUBSCRIBE JOBID            NAME
@@ -495,7 +500,7 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
                     elif tres_mem.endswith('M'): tres_mem = str(int(tres_mem[4:-1])//1024)
                     tres_alloc[line[0]] = tres_mem
             for idx in range(len(data)):
-                data[idx][12] = tres_alloc.get(data[idx][25], "42")
+                data[idx][12] = tres_alloc.get(data[idx][26], "42")
                 gpus = data[idx][1]
                 if gpus == 'N/A':
                     data[idx][1] = '0'
@@ -516,6 +521,8 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
                 data[idx][1] = str(int(data[idx][1]) * nnodes)
         # t集群上处理用户
         for idx in range(len(data)):
+            if '_' not in data[idx][9]:
+                continue
             try:
                 data[idx][20] = data[idx][9].split('_')[0]
             except Exception as e:
