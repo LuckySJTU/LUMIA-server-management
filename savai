@@ -154,7 +154,7 @@ if process.returncode == 0:
             res['alloc']['gpu'] = '-'
         print(formation.format(res['nodename'],str(res['alloc']['cpu'])+'/'+str(res['cfg']['cpu']),str(res['alloc']['mem'])+'/'+str(res['cfg']['mem'])+'G',str(res['alloc']['gpu'])+'/'+str(res['cfg']['gpu']),state))
 
-    command = "squeue -p plm --state=PD --format=%P"
+    command = "squeue -p plm --state=PD --format='%b:%D'"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
     if process.returncode == 0:
@@ -162,29 +162,8 @@ if process.returncode == 0:
         lines = data.strip().split('\n')
         if len(lines) > 1:
             print("    集群还有{}个任务排队中".format(str(len(lines)-1)), end='')
-            a100, rtx3090, rtx4090, ada6000, l40s = 0, 0, 0, 0, 0
-            for line in lines[1:]:
-                if 'A100' in line:
-                    a100 += 1
-                if 'RTX3090' in line:
-                    rtx3090 += 1
-                if 'RTX4090' in line:
-                    rtx4090 += 1
-                if 'ADA6000' in line:
-                    ada6000 += 1
-                if 'L40S' in line:
-                    l40s += 1
-            if a100 > 0:
-                print(" A100:{}".format(str(a100)), end='')
-            if rtx3090 > 0:
-                print(" 3090:{}".format(str(rtx3090)), end='')
-            if rtx4090 > 0:
-                print(" 4090:{}".format(str(rtx4090)), end='')
-            if ada6000 > 0:
-                print(" 6000:{}".format(str(ada6000)), end='')
-            if l40s > 0:
-                print(" L40S:{}".format(str(l40s)), end='')
-            print('')
+            needed_gpus = sum(map(lambda x:int(x.split(':')[1])*int(x.split(':')[2]), [x for x in lines[1:] if len(x.split(':'))==3]))
+            print(f"，预计还需要{needed_gpus}张卡。")
         else:
             print("    努力！努力你就是LUMIA一哥，不努力你就是LUMIA一哥们。")
     else:
