@@ -31,6 +31,51 @@ def print_time(stdscr):
     stdscr.addstr(0, 0, current_time, curses.color_pair(1))
 
 
+def print_all_job_states(stdscr, start_y):
+    height, width = stdscr.getmaxyx()
+    # 17
+    # 获取所有状态的任务
+    command = "squeue --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO --sort=t|awk '{print $5}'"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode == 0:
+        data = stdout.decode('utf-8')
+        lines = data.strip().split('\n')
+        job_state = lines[1:]
+        job_state = dict(Counter(job_state))
+        # 打印各种状态的任务数量
+        states = ['R',"PD","CD","CA","F"]
+        colors = [4,  5,   6,   7,   2]
+        for i in range(len(states)):
+            stdscr.addstr(0, start_y, states[i]+' ', curses.color_pair(colors[i]))
+            stdscr.addstr(0, start_y+1+len(states[i]), str(job_state.get(states[i], 0)), curses.color_pair(1))
+            start_y += 4+len(states[i])
+        count = sum([job_state.get(state, 0) for state in states])
+        stdscr.addstr(0, start_y, "S/T {}/{}".format(str(count), str(len(lines[1:]))), curses.color_pair(1))
+        start_y += len("S/T {}/{}".format(str(count), str(len(lines[1:]))))
+    else:
+        stdscr.addstr(0, start_y, stderr.decode('utf-8'), curses.color_pair(2))
+    return start_y+1
+
+
+def print_number_of_online_user(stdscr, start_y):
+    if not ROOT:
+        return start_y
+    command = "bash /root/ssh_online.sh"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode == 0:
+        data = stdout.decode('utf-8')
+        lines = data.strip().split('\n')
+        lines = lines[1:]
+        local = sum([1 for line in lines if '192.168.105.12' in line])
+        msg = f"U {len(lines)}/{local}"
+        stdscr.addstr(0, start_y, msg, curses.color_pair(1))
+        start_y += len(msg)
+
+    return start_y+1
+
+
 def get_savai():
     command = "scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'"
 
@@ -312,31 +357,6 @@ def print_node_resource_mem(stdscr, result, start_y, full=False):
             stdscr.addstr(start_x + idx, start_y, '{:>3.3}%'.format(str(mem_ratio)), curses.color_pair(1))
 
     return start_y+26+1 if full else start_y+4+1
-
-
-def print_all_job_states(stdscr, start_y):
-    height, width = stdscr.getmaxyx()
-    # 17
-    # 获取所有状态的任务
-    command = "squeue --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO --sort=t|awk '{print $5}'"
-    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-    if process.returncode == 0:
-        data = stdout.decode('utf-8')
-        lines = data.strip().split('\n')
-        job_state = lines[1:]
-        job_state = dict(Counter(job_state))
-        # 打印各种状态的任务数量
-        states = ['R',"PD","CD","CA","F"]
-        colors = [4,  5,   6,   7,   2]
-        for i in range(len(states)):
-            stdscr.addstr(0, start_y, states[i]+' ', curses.color_pair(colors[i]))
-            stdscr.addstr(0, start_y+1+len(states[i]), str(job_state.get(states[i], 0)), curses.color_pair(1))
-            start_y += 4+len(states[i])
-        count = sum([job_state.get(state, 0) for state in states])
-        stdscr.addstr(0, start_y, "S/T {}/{}".format(str(count), str(len(lines[1:]))), curses.color_pair(1))
-    else:
-        stdscr.addstr(0, start_y, stderr.decode('utf-8'), curses.color_pair(2))
 
 
 def print_running_job_on_each_node(stdscr, result, start_y):
@@ -630,21 +650,26 @@ def print_keyborad_info(stdscr, start_x, start_y=0):
     height, width = stdscr.getmaxyx()
     stdscr.addstr(start_x, start_y+0, "F10", curses.color_pair(1))
     stdscr.addstr(start_x, start_y+3, "Quit", curses.color_pair(10))
-    stdscr.addstr(start_x, start_y+7, "F12", curses.color_pair(1))
-    stdscr.addstr(start_x, start_y+10, "Debug", curses.color_pair(10))
+    
+    if ROOT:
+        stdscr.addstr(start_x, start_y+7, "F12", curses.color_pair(1))
+        stdscr.addstr(start_x, start_y+10, "Debug", curses.color_pair(10))
 
 
 def print_version_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
-    version = "By Lucky, v2.2"
+    version = "By Lucky, v2.3"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
 def gridview(stdscr):
     global DEBUG_MODE
+    global ROOT
 
     NODES, nodename_list = get_node_number()
     DEBUG_MODE = False
+    ROOT = os.geteuid() == 0
+
     # 取消屏幕回显
     curses.noecho()
     # 开启非阻塞输入
@@ -720,7 +745,9 @@ def gridview(stdscr):
                 start_y = print_node_resource_gpu(win1, result, start_y, True)
                 print_running_job_on_each_node(win1, result, start_y)
                 # 任务状态总览
-                print_all_job_states(win1, start_y = 22)
+                start_y = print_all_job_states(win1, start_y = 22)
+                # 在线会话数量
+                print_number_of_online_user(win1, start_y=start_y)
                 win1.noutrefresh()
 
                 # win2只在数据迭代时清空
@@ -799,5 +826,5 @@ if __name__ == "__main__":
         curses.wrapper(gridview)
     except KeyboardInterrupt:
         exit(0)
-    # except curses.error:
-    #     print("Please use a larger terminal to show detailed information")
+    except curses.error:
+        print("Please use a larger terminal to show detailed information")
