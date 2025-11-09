@@ -38,6 +38,7 @@ ANSI = {
 TZ_ALIAS_MAP = {
     'AoE': 'Etc/GMT+12',
     'UTC': 'UTC',
+    'UTC+0': 'Etc/GMT-0',
     **{'UTC{}'.format(i): f'Etc/GMT{-i}' if i >= 0 else f'Etc/GMT+{-i}' for i in range(-12, 13)}
 }
 
