@@ -61,17 +61,26 @@ def print_all_job_states(stdscr, start_y):
 def print_number_of_online_user(stdscr, start_y):
     if not ROOT:
         return start_y
-    command = "bash /root/ssh_online.sh"
-    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-    if process.returncode == 0:
-        data = stdout.decode('utf-8')
-        lines = data.strip().split('\n')
-        lines = lines[1:]
-        local = sum([1 for line in lines if '192.168.105.12' in line])
-        msg = f"U {len(lines)}/{local}"
-        stdscr.addstr(0, start_y, msg, curses.color_pair(1))
-        start_y += len(msg)
+    
+    global UPDATE_TIME_NUMBER_OF_ONLINE_USER
+    global NUMBER_OF_ONLINE_USER_MSG
+
+    UPDATE_TIME_NUMBER_OF_ONLINE_USER = (UPDATE_TIME_NUMBER_OF_ONLINE_USER+1)%10
+    
+    if UPDATE_TIME_NUMBER_OF_ONLINE_USER == 1:
+        command = "bash /root/ssh_online.sh"
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        if process.returncode == 0:
+            data = stdout.decode('utf-8')
+            lines = data.strip().split('\n')
+            lines = lines[1:]
+            local = sum([1 for line in lines if '192.168.105.12' in line])
+            msg = f"U {len(lines)}/{local}"
+            NUMBER_OF_ONLINE_USER_MSG = msg
+    
+    stdscr.addstr(0, start_y, NUMBER_OF_ONLINE_USER_MSG, curses.color_pair(1))
+    start_y += len(NUMBER_OF_ONLINE_USER_MSG)
 
     return start_y+1
 
@@ -665,10 +674,12 @@ def print_version_info(stdscr, start_x):
 def gridview(stdscr):
     global DEBUG_MODE
     global ROOT
+    global UPDATE_TIME_NUMBER_OF_ONLINE_USER
 
     NODES, nodename_list = get_node_number()
     DEBUG_MODE = False
     ROOT = os.geteuid() == 0
+    UPDATE_TIME_NUMBER_OF_ONLINE_USER = 0
 
     # 取消屏幕回显
     curses.noecho()
