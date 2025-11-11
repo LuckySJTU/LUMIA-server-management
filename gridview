@@ -2,12 +2,23 @@
 # -*- coding: utf-8 -*-
 import curses
 import time
+from datetime import datetime
 import subprocess
 import re
 import locale
 from collections import Counter
 import random
 import os
+import sys
+import pwd
+
+try:
+    import psutil
+except ImportError:
+    print("Please: pip install psutil", file=sys.stderr)
+    sys.exit(1)
+
+VERSION = 'v2.3'
 
 def get_node_number():
     command = 'scontrol show node | grep "NodeName"'
@@ -653,6 +664,124 @@ def print_average_load(stdscr, start_x, start_y):
     stdscr.addstr(start_x, start_y, "Load average:", curses.color_pair(6))
     stdscr.addstr(start_x, start_y+13, f"{format_sysload(load_avg[0])}", curses.color_pair(1)|curses.A_BOLD)
     stdscr.addstr(start_x, start_y+18, f"{format_sysload(load_avg[1])} {format_sysload(load_avg[2])}", curses.color_pair(6))
+    # if ROOT and load_avg[0] > 30:
+    kill_over_load_job_auto()
+
+def username_of(uid):
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except Exception:
+        return str(uid)
+
+def collect_ps_info(interval_sec):
+    """
+    返回：pid -> dict(cpu_percent=float, user=str, cmdline=str)
+    """
+    procs = {p.pid: p for p in psutil.process_iter(attrs=["pid", "username", "cmdline"])}
+
+    # 先 prime 一次 cpu_percent
+    for p in procs.values():
+        try:
+            p.cpu_percent(None)
+        except Exception:
+            pass
+
+    time.sleep(interval_sec)
+
+    out = {}
+    for pid, p in procs.items():
+        try:
+            cpu = p.cpu_percent(None)  # 与上次调用间隔期间的平均 CPU%
+            u = p.uids().real if hasattr(p, "uids") else None
+            user = p.username() if p.info.get("username") is None else p.info["username"]
+            if user is None and u is not None:
+                user = username_of(u)
+            cmdline = " ".join(p.info.get("cmdline") or p.cmdline() or []) or (p.name() or "")
+            out[pid] = dict(cpu_percent=cpu, user=user, cmdline=cmdline)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:
+            continue
+    return out
+
+def looks_like_vscode_task(proc):
+    """
+    排除规则：
+    - 进程的 cwd/cmdline/path 中包含 '/.vscode/'
+    - 命令行中包含类似 'vscode-server' / VSCode 扩展运行路径（常见于 ~/.vscode）
+    """
+    patterns = ["/.vscode/", "vscode-server", "VSCode"]
+    try:
+        # cwd
+        cwd = ""
+        try:
+            cwd = proc.cwd() or ""
+        except Exception:
+            pass
+        # exe path
+        exe = ""
+        try:
+            exe = proc.exe() or ""
+        except Exception:
+            pass
+        # cmdline
+        cmdline = " ".join(proc.cmdline()) if proc.cmdline() else ""
+        hay = " ".join([cwd, exe, cmdline]).lower()
+        return any(p.lower() in hay for p in patterns)
+    except Exception:
+        return False
+
+def get_overload_job():
+    ps_info = collect_ps_info(interval_sec=1)
+
+    rows = []
+    for pid, info in ps_info.items():
+        # 过滤掉 root
+        if info.get("user") in ("root", "0"):
+            continue
+
+        # 过滤 VSCode 任务
+        try:
+            proc = psutil.Process(pid)
+            if looks_like_vscode_task(proc):
+                continue
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:
+            pass
+
+        cpu = info.get("cpu_percent", 0.0)
+
+        tx_mbps = rx_mbps = 0.0
+
+        over_cpu = cpu >= 100
+
+        if over_cpu:
+            rows.append((
+                pid,
+                info.get("user", "?"),
+                cpu,
+                tx_mbps,
+                rx_mbps,
+                info.get("cmdline", "")
+            ))
+
+    # 排序：优先网络（TX+RX），再 CPU
+    def sort_key(r):
+        _, _, cpu, tx, rx, _ = r
+        return (tx + rx, cpu)
+
+    rows.sort(key=sort_key, reverse=True)
+    return rows
+
+def kill_over_load_job_auto():
+    if not ROOT:
+        return
+    overload_job_list = get_overload_job()
+    global LOGS
+    for job in overload_job_list:
+        LOGS = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Kill {job[0]}, User {job[1]}, Cmd {job[-1]}"
+        os.kill(job[0],9)
 
 
 def print_keyborad_info(stdscr, start_x, start_y=0):
@@ -663,11 +792,21 @@ def print_keyborad_info(stdscr, start_x, start_y=0):
     if ROOT:
         stdscr.addstr(start_x, start_y+7, "F12", curses.color_pair(1))
         stdscr.addstr(start_x, start_y+10, "Debug", curses.color_pair(10))
+        return start_y+15
+    return start_y+7
+
+
+def print_last_log(stdscr, start_x, start_y):
+    if ROOT and len(LOGS) > 0:
+        height, width = stdscr.getmaxyx()
+        version = f"By Lucky, {VERSION}"
+        log_length = min(len(LOGS), width-start_y-len(version)-4)
+        stdscr.addstr(start_x, start_y+1, ' >>'+LOGS[:log_length], curses.color_pair(1))
 
 
 def print_version_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
-    version = "By Lucky, v2.3"
+    version = f"By Lucky, {VERSION}"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
@@ -675,11 +814,13 @@ def gridview(stdscr):
     global DEBUG_MODE
     global ROOT
     global UPDATE_TIME_NUMBER_OF_ONLINE_USER
+    global LOGS
 
     NODES, nodename_list = get_node_number()
     DEBUG_MODE = False
     ROOT = os.geteuid() == 0
     UPDATE_TIME_NUMBER_OF_ONLINE_USER = 0
+    LOGS = ''
 
     # 取消屏幕回显
     curses.noecho()
@@ -797,7 +938,9 @@ def gridview(stdscr):
                 win3.erase()
                 clear_win3 = False
                 # 打印键盘快捷键信息
-                print_keyborad_info(win3, start_x=0)
+                start_y = print_keyborad_info(win3, start_x=0)
+                # 打印上一条日志
+                print_last_log(win3, start_x=0, start_y=start_y)
                 # 打印版本号
                 print_version_info(win3, start_x=0)
                 win3.noutrefresh()
