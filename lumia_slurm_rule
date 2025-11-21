@@ -34,6 +34,7 @@ def extract_job_info():
     partition_pattern = re.compile(r'Partition=([\w,]+)')
     tres_pattern = re.compile(r'TRES=cpu=(\d+),mem=(\d+)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?')
     req_exc_node_pattern = re.compile(r'ReqNodeList=([\w\d]+) ExcNodeList=([\w\d]+)')
+    reason_pattern = re.compile(r'Reason=([\w,]+)')
 
     result = {}
     for job in job_data:
@@ -45,6 +46,7 @@ def extract_job_info():
         partition_match = partition_pattern.search(job)
         tres_match = tres_pattern.search(job)
         req_exc_node_match = req_exc_node_pattern.search(job)
+        reason_match = reason_pattern.search(job)
 
         if jobid_match and userid_match and priority_match and jobstate_match and partition_match and tres_match:
             jobid = jobid_match.group(1)
@@ -57,7 +59,8 @@ def extract_job_info():
             mem = int(tres_match.group(2)) * (1024 if tres_match.group(3) == 'G' else 1)
             gpu = int(tres_match.group(6)) if tres_match.group(6) else 0
             reqnodelist = req_exc_node_match.group(1).split(',') if req_exc_node_match else None
-            excnodelist = req_exc_node_match.group(1).split(',') if req_exc_node_match else None
+            excnodelist = req_exc_node_match.group(2).split(',') if req_exc_node_match else None
+            reason = reason_match.group(1) if reason_match else None
 
             job_info = {
                 'jobid': jobid,
@@ -71,6 +74,7 @@ def extract_job_info():
                 'gpu': gpu,
                 'reqnode': reqnodelist,
                 'excnode': excnodelist,
+                'reason': reason,
             }
 
             if userid not in result:
@@ -87,16 +91,23 @@ def filter_jobs(job_info):
     for userid, jobs in job_info.items():
         running_jobs = [job for job in jobs if job['jobstate'] == 'RUNNING']
         # running_jobs = [job for job in jobs if job['jobstate'] == 'RUNNING' and 'cpu' not in job['partition']]
+
         for job in jobs:
             if 'debug' in job['partition'] or 'cpu' in job['partition']:
                 continue
-            if job['jobstate'] == 'PENDING' and job['priority'] >= 2000:
+            if job['jobstate'] == 'PENDING' and job['priority'] >= 2000 and job['reason'] in ['Resources', 'Priority']:
+                ### 正在排队的高优任务可以被调度
+                ### 不允许无法调度的任务进入
                 schedulable_jobs.append(job)
-            if job['jobstate'] == 'RUNNING' and job['priority'] <= 1000:
+            if job['jobstate'] == 'RUNNING' and job['priority'] <= 1000 and len(running_jobs) > 1:
+                ### 筛选可以被结束的任务，不包含debug等
+                ### 如果只有一个任务正在跑，那么不能结束
                 terminable_jobs.append(job)
-        if len(running_jobs) == 1:
-            single_running_job = running_jobs[0]
-            terminable_jobs = [job for job in terminable_jobs if job['jobid'] != single_running_job['jobid']]
+        
+        # if len(running_jobs) == 1:
+        #     single_running_job = running_jobs[0]
+        #     terminable_jobs = [job for job in terminable_jobs if job['jobid'] != single_running_job['jobid']]
+
 
     return schedulable_jobs, terminable_jobs
 
@@ -196,7 +207,7 @@ def requeue_job(jobs):
             logger.warning("Job {} has been requeued".format(job['jobid']))
     with open("/etc/slurm/lumia_rule.pkl", 'wb') as f:
         pickle.dump(data, f, protocol=2)
-    logger.info(data)
+    logger.debug(data)
     return
 
 def check_resources(schedulable_jobs, terminable_jobs):
@@ -236,7 +247,7 @@ def check_resources(schedulable_jobs, terminable_jobs):
                 schedulable_jobs.remove(schedulable_job)
                 exit(0)
         else:
-            logger.debug("Resource not enough, try to requeue some jobs")
+            logger.info("Resource not enough, try to requeue some jobs")
         logger.debug(available_resources)
         candidate_jobs = []
         for node, available_resource in available_resources.items(): 
@@ -275,7 +286,7 @@ def check_resources(schedulable_jobs, terminable_jobs):
                     node_resources[late_job['nodelist']]['alloc'][resource] += schedulable_job[resource]
                 continue
 
-        logger.debug("Try to free a node")
+        logger.info("Try to free a node")
         for node, available_resource in available_resources.items():
             candidate_jobs = []
             sufficient_resources_from_terminable = False
@@ -297,9 +308,9 @@ def check_resources(schedulable_jobs, terminable_jobs):
             if sufficient_resources_from_terminable:
                 break
             if len(candidate_jobs) > 0:
-                logger.debug("Clearing {} wont satisfies {} in which node jobs are {}".format(node, schedulable_job['jobid'], [j['jobid'] for j in candidate_jobs]))
+                logger.info("Clearing {} wont satisfies {} in which node jobs are {}".format(node, schedulable_job['jobid'], [j['jobid'] for j in candidate_jobs]))
             else:
-                logger.debug("There is no requeueable job on {}".format(node))
+                logger.info("There is no requeueable job on {}".format(node))
 
 if __name__ == "__main__":
     job_info_result = extract_job_info()
