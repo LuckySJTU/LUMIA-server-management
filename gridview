@@ -114,21 +114,21 @@ def get_savai():
                 full_count += 1
             else:
                 filter_result.append(res)
-        if empty_count > 0:
+        if empty_count >= 0:
             filter_result.append({
                 'nodename': f"EMPTY x{empty_count}",
                 'state': 'IDLE',
                 'alloc': {"cpu":0, "mem":0, "gpu":0},
                 'cfg': {"cpu":128, "mem":2001, "gpu":8},
             })
-        if full_count > 0:
+        if full_count >= 0:
             filter_result.append({
                 'nodename': f"FULL x{full_count}",
                 'state': 'ALLOCATED',
                 'alloc': {"cpu":42, "mem":42, "gpu":8},
                 'cfg': {"cpu":128, "mem":2001, "gpu":8},
             })
-        return filter_result
+        return filter_result[-2:]
     else:
         return stderr.decode('utf-8')
 
@@ -213,7 +213,7 @@ def get_second(slurm_time):
 
 
 def get_squeue_sort_func(key):
-    sort_dict = {"j":8, "a":41, "e":9, "u":20, "s":19, "t":38, "l":11, "c":28, "m":12, "g":1, "q":16, "p":42, "n":43}
+    sort_dict = {"j":8, "a":41, "e":9, "u":20, "s":19, "t":38, "l":11, "c":28, "m":12, "g":1, "q":18, "p":42, "n":43}
     idx = sort_dict.get(key.lower()[-1], 8)
     if key in 'tl':
         # 处理时间格式
@@ -383,13 +383,15 @@ def print_all_job_states(stdscr, start_y):
         data = stdout.decode('utf-8')
         lines = data.strip().split('\n')
         lines = lines[1:]
-        lines = [(x.split()[6],x.split()[9].split(':')[-1]) for x in lines]
+        lines = [(x.split()[6],x.split()[9].split(':')[-1],x.split()[3]) for x in lines]
         if len(lines) > 0:
-            pd_sum = sum([int(x[1]) for x in lines if x[0]=='PD'])
-            r_sum = sum([int(x[1]) for x in lines if x[0]=='R'])
+            pd_reserved_sum = sum([int(x[1]) for x in lines if x[0]=='PD' and x[2]=='reserved'])
+            r_reserved_sum = sum([int(x[1]) for x in lines if x[0]=='R' and x[2]=='reserved'])
+            pd_spot_sum = sum([int(x[1]) for x in lines if x[0]=='PD' and x[2]!='reserved'])
+            r_spot_sum = sum([int(x[1]) for x in lines if x[0]=='R' and x[2]!='reserved'])
             # pd_sum = sum(map(lambda x:int(x.split(':')[2])*int(x.split(':')[3]), [x for x in lines if len(x.split(':'))==4 and x.startswith("PD")]))
             # r_sum = sum(map(lambda x:int(x.split(':')[2])*int(x.split(':')[3]), [x for x in lines if len(x.split(':'))==4 and x.startswith("R")]))
-            stdscr.addstr(0, start_y, "R\\PD {}\\{}".format(str(r_sum), str(pd_sum)), curses.color_pair(1))
+            stdscr.addstr(0, start_y, "R,PD {},{}/{},{}".format(str(r_reserved_sum), str(pd_reserved_sum), str(r_spot_sum), str(pd_spot_sum)), curses.color_pair(1))
 
 
 def print_running_job_on_each_node(stdscr, result, start_y):
@@ -486,7 +488,7 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
         # 0-4   ACCOUNT          TRES_PER_NODE     MIN_CPUS       MIN_TMP_DISK     END_TIME
         # 5-9   FEATURES         GROUP             OVER_SUBSCRIBE JOBID            NAME
         # 10-14 COMMENT          TIME_LIMIT        MIN_MEMORY     REQ_NODES        COMMAND
-        # 15-19 PRIORITY         QOS               REASON                          ST
+        # 15-19 PRIORITY         QOS               REASON         (QUOTA_TYPE*)    ST
         # 20-24 USER             RESERVATION       WCKEY          EXC_NODES        NICE
         # 25-29 S:C:T            JOBID             EXEC_HOST      CPUS             NODES
         # 30-34 DEPENDENCY       ARRAY_JOB_ID      GROUP          SOCKETS_PER_NODE CORES_PER_SOCKET
@@ -495,30 +497,33 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
         # 45-49 STATE            UID               SUBMIT_TIME    LICENSES         CORE_SPEC
         # 50-51 SCHEDNODES       WORK_DIR
         
-        # JOBID PARTITION NAME USER ST TIME TIME-LIMIT CPU MEM GPU QOS PRIORITY NODELIST(REASON)
-        # 8     41        9    20   19 38   11         28  12  1   16  42       43
+        # JOBID PARTITION NAME USER ST TIME TIME-LIMIT CPU MEM GPU QUOTA PRIORITY NODELIST(REASON)
+        # 8     41        9    20   19 38   11         28  12  1   18    42       43
         title_list = ['JOBID', "PARTITION", "NAME", "USER", "ST", 
                       "TIME", "TIME-LIMIT", "CPU", "MEM", "GPU", 
-                      "QOS", "PRIOR", "NODELIST(REASON)"]
-        show_list = [8,41,9,20,19,38,11,28,12,1,16,42,43]
-        # 处理MEM和GPU
-        command = "squeue -p plm --Format=jobid,tres-alloc:50 --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
+                      "QUOTA", "PRIOR", "NODELIST(REASON)"]
+        show_list = [8,41,9,20,19,38,11,28,12,1,18,42,43]
+        # 处理QUOTA_TYPE, MEM和GPU
+        command = "squeue -p plm --Format=jobid,tres-alloc:100,quotatype --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
         process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate()
         if process.returncode == 0:
             lines = stdout.decode('utf-8').strip().split('\n')[1:]
             tres_alloc = {}
+            quota_map = {}
             for line in lines:
                 line = line.split()
-                if len(line) == 2:
+                if len(line) == 3:
                     tres_mem = line[1].split(',')[1]
                     if tres_mem.endswith('G'): tres_mem = tres_mem[4:-1]
                     elif tres_mem.endswith('M'): tres_mem = str(int(tres_mem[4:-1])//1024)
                     else: tres_mem = None
                     if tres_mem:
                         tres_alloc[line[0]] = tres_mem
+                    quota_map[line[0]] = line[2]
             for idx in range(len(data)):
                 data[idx][12] = tres_alloc.get(data[idx][26], "42")
+                data[idx][18] = quota_map.get(data[idx][26], "N/A") # (QUOTA_TYPE*)
                 gpus = data[idx][1]
                 if gpus == 'N/A':
                     # t集群处理
@@ -526,9 +531,13 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
                     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     stdout, stderr = process.communicate()
                     if process.returncode == 0:
-                        mini_lines = stdout.decode('utf-8').strip().split('\n')[1]
-                        mini_lines = mini_lines.split()
-                        data[idx][1] = mini_lines[-2].split(':')[-1]
+                        mini_lines = stdout.decode('utf-8').strip().split('\n')
+                        if len(mini_lines) == 1:
+                            data[idx][1] = '0'
+                        else:
+                            mini_lines = mini_lines[-1]
+                            mini_lines = mini_lines.split()
+                            data[idx][1] = mini_lines[-2].split(':')[-1]
                 else:
                     data[idx][1] = gpus.split(':')[-1]
         else:
@@ -546,12 +555,18 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
                 data[idx][1] = str(int(data[idx][1]) * nnodes)
         # t集群上处理用户
         for idx in range(len(data)):
-            if '_' not in data[idx][9] or '-' not in data[idx][9]:
+            if '_' not in data[idx][9] and '-' not in data[idx][9]:
                 continue
-            try:
+            
+            underline_idx = data[idx][9].find('_')
+            dashline_idx = data[idx][9].find('-')
+            if dashline_idx < 0 or underline_idx < dashline_idx:
                 data[idx][20] = data[idx][9].split('_')[0]
-            except Exception as e:
+            elif underline_idx < 0 or dashline_idx < underline_idx:
+                data[idx][20] = data[idx][9].split('-')[0]
+            else:
                 data[idx][20] = 'zhouhan'
+            
         # 排序
         data.sort(key=get_squeue_sort_func(sort.lower()[-1]), reverse=sort.startswith('-'))
         data = data[:max_line]
@@ -719,7 +734,7 @@ def print_keyborad_info(stdscr, start_x, start_y=0):
 
 def print_version_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
-    version = "By Lucky, v2.2t"
+    version = "By Lucky, v2.3t"
     stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
 
 
@@ -773,8 +788,8 @@ def gridview(stdscr):
             old_width = width
             # 0-NODES: 显示时间和节点信息，NODES+1空，[NODES+2, heigh-2]显示任务信息， height-1显示提示信息
             stdscr.clear()
-            win1 = curses.newwin(height//2-1, width, 0, 0)
-            win2 = curses.newwin(height-height//2-1, width, height//2, 0)
+            win1 = curses.newwin(3, width, 0, 0)
+            win2 = curses.newwin(height-5, width, 4, 0)
             win2.immedok(True)
             win3 = curses.newwin(1, width, height-1, 0)
             stdscr.refresh() # 确保窗口正确初始化
