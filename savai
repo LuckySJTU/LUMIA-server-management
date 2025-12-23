@@ -101,8 +101,10 @@ if process.returncode == 0:
     full_count = 0
     filter_result = []
     for res in result:
+        if res['partition'] != 'baihu':
+            continue
         state = res['state']
-        if "DOWN" in state or "FAIL" in state or "DRAIN" in state or "NOT_RESPONDING" in state:
+        if "DOWN" in state or "FAIL" in state or "DRAIN" in state or "NOT_RESPONDING" in state or "COMPLETING" in state:
             filter_result.append(res)
             continue
         if map_resource(res['alloc'],(0,0,0)) and map_resource(res['cfg'], (128,2001,8)):
