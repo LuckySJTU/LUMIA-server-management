@@ -12,6 +12,9 @@ import os
 import sys
 import pwd
 import shutil
+import threading
+import multiprocessing as mp
+import traceback
 
 try:
     import psutil
@@ -19,8 +22,176 @@ except ImportError:
     print("Please: pip install psutil", file=sys.stderr)
     sys.exit(1)
 
-VERSION = 'v2.3'
+VERSION = 'v3.0'
 
+# -----------------------------
+# 并行采集框架：DataBus + 周期采集 + 子进程超时
+# -----------------------------
+class Sample:
+    __slots__ = ("value", "ts", "ok", "err", "timeout", "last_duration", "runs")
+    def __init__(self, value=None, ts=0.0, ok=False, err=None, timeout=False, last_duration=0.0, runs=0):
+        self.value = value
+        self.ts = ts
+        self.ok = ok
+        self.err = err
+        self.timeout = timeout
+        self.last_duration = last_duration
+        self.runs = runs
+
+class DataBus:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._data = {}
+
+    def set(self, key, sample: Sample):
+        with self._lock:
+            self._data[key] = sample
+
+    def get(self, key, default=None):
+        with self._lock:
+            return self._data.get(key, default)
+
+def _child_entry(fn, q):
+    try:
+        v = fn()
+        q.put(("ok", v, None))
+    except Exception:
+        q.put(("err", None, traceback.format_exc()))
+
+def run_with_timeout(fn, timeout_s: float):
+    """
+    在子进程中执行 fn，超时强制终止，避免 NFS/系统调用卡死。
+    返回 (ok, value, err, timeout, duration)
+    """
+    q = mp.Queue(maxsize=1)
+    p = mp.Process(target=_child_entry, args=(fn, q), daemon=True)
+    t0 = time.time()
+    p.start()
+    p.join(timeout_s)
+    dur = time.time() - t0
+
+    if p.is_alive():
+        p.terminate()
+        p.join(1.0)
+        return False, None, f"timeout>{timeout_s}s", True, dur
+
+    try:
+        st, v, err = q.get_nowait()
+    except Exception:
+        return False, None, "no_result_from_child", False, dur
+
+    if st == "ok":
+        return True, v, None, False, dur
+    return False, None, err, False, dur
+
+class PeriodicCollector:
+    """
+    周期采集器：后台线程按 interval 跑；每次采集在子进程里执行并超时。
+    """
+    def __init__(self, key, fn, bus: DataBus, stop_event: threading.Event,
+                 interval_s=1.0, timeout_s=0.7):
+        self.key = key
+        self.fn = fn
+        self.bus = bus
+        self.stop_event = stop_event
+        self.interval_s = float(interval_s)
+        self.timeout_s = float(timeout_s)
+        self._thread = None
+        self._runs = 0
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name=f"collector:{self.key}", daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        next_t = time.time()
+        while not self.stop_event.is_set():
+            now = time.time()
+            if now >= next_t:
+                self._runs += 1
+                ok, v, err, is_timeout, dur = run_with_timeout(self.fn, self.timeout_s)
+                self.bus.set(self.key, Sample(
+                    value=v if ok else None,
+                    ts=time.time(),
+                    ok=ok,
+                    err=None if ok else (err or "error"),
+                    timeout=is_timeout,
+                    last_duration=dur,
+                    runs=self._runs,
+                ))
+                next_t = now + self.interval_s
+            self.stop_event.wait(0.02)
+
+class PeriodicCollectorThreadOnly:
+    """
+    周期采集器（线程内执行，不创建子进程）：
+    适用于需要保留状态（prev）或很快的采集（/proc 读取）。
+    """
+    def __init__(self, key, fn, bus: DataBus, stop_event: threading.Event,
+                 interval_s=1.0):
+        self.key = key
+        self.fn = fn
+        self.bus = bus
+        self.stop_event = stop_event
+        self.interval_s = float(interval_s)
+        self._thread = None
+        self._runs = 0
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name=f"collector_thread:{self.key}", daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        next_t = time.time()
+        while not self.stop_event.is_set():
+            now = time.time()
+            if now >= next_t:
+                self._runs += 1
+                t0 = time.time()
+                try:
+                    v = self.fn()
+                    ok, err, is_timeout = True, None, False
+                except Exception:
+                    v, ok, err, is_timeout = None, False, traceback.format_exc(), False
+                dur = time.time() - t0
+                self.bus.set(self.key, Sample(
+                    value=v if ok else None,
+                    ts=time.time(),
+                    ok=ok,
+                    err=None if ok else (err or "error"),
+                    timeout=is_timeout,
+                    last_duration=dur,
+                    runs=self._runs,
+                ))
+                next_t = now + self.interval_s
+            self.stop_event.wait(0.02)
+
+class CollectorManager:
+    def __init__(self, bus: DataBus, stop_event: threading.Event):
+        self.bus = bus
+        self.stop_event = stop_event
+        self.collectors = {}
+
+    def add(self, key, fn, interval_s=1.0, timeout_s=0.7):
+        self.collectors[key] = PeriodicCollector(key, fn, self.bus, self.stop_event, interval_s, timeout_s)
+    
+    def add_thread_only(self, key, fn, interval_s=1.0):
+        self.collectors[key] = PeriodicCollectorThreadOnly(key, fn, self.bus, self.stop_event, interval_s)
+
+    def start_all(self):
+        for c in self.collectors.values():
+            c.start()
+
+    def stop_all(self):
+        self.stop_event.set()
+
+# -----------------------------
+# 你原本的逻辑函数（尽量不动）
+# -----------------------------
 def get_node_number():
     command = 'scontrol show node | grep "NodeName"'
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -35,261 +206,110 @@ def get_node_number():
     else:
         return 0, []
 
-
 def print_time(stdscr):
-    # 获取当前时间
     current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-    # 在第一行显示当前时间，使用黑字白底
     stdscr.addstr(0, 0, current_time, curses.color_pair(1))
-
-
-def print_all_job_states(stdscr, start_y):
-    height, width = stdscr.getmaxyx()
-    # 17
-    # 获取所有状态的任务
-    command = "squeue --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO --sort=t|awk '{print $5}'"
-    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-    if process.returncode == 0:
-        data = stdout.decode('utf-8')
-        lines = data.strip().split('\n')
-        job_state = lines[1:]
-        job_state = dict(Counter(job_state))
-        # 打印各种状态的任务数量
-        states = ['R',"PD","CD","CA","F"]
-        colors = [4,  5,   6,   7,   2]
-        for i in range(len(states)):
-            stdscr.addstr(0, start_y, states[i]+' ', curses.color_pair(colors[i]))
-            stdscr.addstr(0, start_y+1+len(states[i]), str(job_state.get(states[i], 0)), curses.color_pair(1))
-            start_y += 4+len(states[i])
-        count = sum([job_state.get(state, 0) for state in states])
-        stdscr.addstr(0, start_y, "S/T {}/{}".format(str(count), str(len(lines[1:]))), curses.color_pair(1))
-        start_y += len("S/T {}/{}".format(str(count), str(len(lines[1:]))))
-    else:
-        stdscr.addstr(0, start_y, stderr.decode('utf-8'), curses.color_pair(2))
-    return start_y+1
-
-
-def print_number_of_online_user(stdscr, start_y):
-    if not ROOT:
-        return start_y
-    
-    global UPDATE_TIME_NUMBER_OF_ONLINE_USER
-    global NUMBER_OF_ONLINE_USER_MSG
-
-    UPDATE_TIME_NUMBER_OF_ONLINE_USER = (UPDATE_TIME_NUMBER_OF_ONLINE_USER+1)%10
-    
-    if UPDATE_TIME_NUMBER_OF_ONLINE_USER == 1:
-        command = "bash /root/ssh_online.sh"
-        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
-        if process.returncode == 0:
-            data = stdout.decode('utf-8')
-            lines = data.strip().split('\n')
-            lines = lines[1:]
-            local = sum([1 for line in lines if '192.168.105.12' in line])
-            msg = f"U {len(lines)}/{local}"
-            NUMBER_OF_ONLINE_USER_MSG = msg
-    
-    stdscr.addstr(0, start_y, NUMBER_OF_ONLINE_USER_MSG, curses.color_pair(1))
-    start_y += len(NUMBER_OF_ONLINE_USER_MSG)
-
-    return start_y+1
-
-
-def get_savai():
-    command = "scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'"
-
-    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-
-    if process.returncode == 0:
-        data = stdout.decode('utf-8')
-        lines = data.strip().split('\n')
-        result = []
-        node_pattern = re.compile(r'NodeName=(\w+)')
-        state_pattern = re.compile(r'   State=([\w\+]+)')
-        cfg_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),billing=\d+,gres/gpu=(\d+)')
-        alloc_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),gres/gpu=(\d+)')
-
-        for line in lines:
-            if 'CfgTRES' in line:
-                match = cfg_pattern.match(line)
-                if match:
-                    cpu, mem, mem_unit, gpu = match.groups()
-                    result[-1]['cfg']['cpu'] = int(cpu)
-                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
-                    mem_value -= 10
-                    result[-1]['cfg']['mem'] = mem_value
-                    result[-1]['cfg']['gpu'] = int(gpu)
-                else:
-                    cfg_cpu_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),billing=\d+')
-                    match = cfg_cpu_pattern.match(line)
-                    if match:
-                        cpu, mem, mem_unit = match.groups()
-                        result[-1]['cfg']['cpu'] = int(cpu)
-                        mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
-                        mem_value -= 128
-                        result[-1]['cfg']['mem'] = mem_value
-            elif 'AllocTRES' in line:
-                match = alloc_pattern.match(line)
-                if match:
-                    cpu, mem, mem_unit, gpu = match.groups()
-                    result[-1]['alloc']['cpu'] = int(cpu)
-                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
-                    result[-1]['alloc']['mem'] = mem_value
-                    result[-1]['alloc']['gpu'] = int(gpu)
-                else:
-                    alloc_cpu_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG])')
-                    match = alloc_cpu_pattern.match(line)
-                    if match:
-                        cpu, mem, mem_unit = match.groups()
-                        result[-1]['alloc']['cpu'] = int(cpu)
-                        mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem)/102.4)//10
-                        result[-1]['alloc']['mem'] = mem_value
-            elif 'NodeName' in line:
-                match = node_pattern.match(line)
-                if match:
-                    nodename = match.group(1)
-                    result.append({'nodename':nodename,'state':'UNKNOWN','alloc':{'cpu':0,'mem':0,'gpu':0},'cfg':{'cpu':0,'mem':0,'gpu':0}})
-            elif 'State' in line:
-                match = state_pattern.match(line)
-                if match:
-                    state = match.group(1)
-                    result[-1]['state'] = state
-        return result
-    else:
-        return stderr.decode('utf-8')
-
 
 def print_node_name(stdscr, nodename_list):
     height, width = stdscr.getmaxyx()
-    for i in range(1, len(nodename_list)+1):
+    for i in range(1, len(nodename_list) + 1):
         if i < height:
-            stdscr.addstr(i, 0, nodename_list[i-1], curses.color_pair(6))
-
+            stdscr.addstr(i, 0, nodename_list[i - 1], curses.color_pair(6))
 
 def print_node_resource_err(stdscr, result, start_y=3):
     stdscr.addstr(1, start_y, str(result), curses.color_pair(2))
 
-
-def get_alloc_color(alloc, all):
-    if alloc < all*0.5:
-        color = 4 #绿色
-    elif alloc > all * 0.9:
-        color = 7 # 品红
+def get_alloc_color(alloc, all_):
+    if all_ <= 0:
+        return 1
+    if alloc < all_ * 0.5:
+        color = 4
+    elif alloc > all_ * 0.9:
+        color = 7
     else:
-        color = 5 # 黄色
+        color = 5
     return color
 
-
-def get_alloc_logo(alloc, all):
-    if alloc == 0:
-        logo = "▢"
-    elif alloc <= all * 0.125:
-        logo = '▁'
-    elif alloc <= all * 0.25:
-        logo = '▂'
-    elif alloc <= all * 0.333:
-        logo = '▃'
-    elif alloc <= all * 0.5:
-        logo = '▄'
-    elif alloc <= all * 0.625:
-        logo = '▅'
-    elif alloc <= all * 0.75:
-        logo = '▆'
-    elif alloc <= all * 0.875:
-        logo = '▇'
-    else:
-        logo = '█'
-    return logo
-
-
 def get_partition_order(x):
-    partition_order = {"cpu":0, "A100":1, "RTX3090":2, "RTX4090":3, "ADA6000":4, "L40S":5}
+    partition_order = {"cpu": 0, "A100": 1, "RTX3090": 2, "RTX4090": 3, "ADA6000": 4, "L40S": 5}
     return partition_order.get(x, 99)
 
-
 def get_nodelist_order(x):
-    if x.startswith("("): return "zzzzzzzzzzz"+x
-    else: return x
-
+    if x.startswith("("):
+        return "zzzzzzzzzzz" + x
+    else:
+        return x
 
 def get_job_order(x):
-    # if '_' in x:
-    #     return int(x.split('_')[0])
-    # else:
-    #     return int(x)
     try:
         return int(x)
     except:
         return int(x.split('_')[0])
 
-
 def get_second(slurm_time):
     if slurm_time == 'UNLIMITED':
         return 1e9
-    slurm_time = slurm_time.split('-')  # 分离天数和时间部分
-    if len(slurm_time)>1: days, time_part = slurm_time[0], slurm_time[1]
-    else: days, time_part = 0, slurm_time[0]
+    slurm_time = slurm_time.split('-')
+    if len(slurm_time) > 1:
+        days, time_part = slurm_time[0], slurm_time[1]
+    else:
+        days, time_part = 0, slurm_time[0]
     time_part = time_part.split(':')
-    if len(time_part) == 3: hours, minutes, seconds = map(int, time_part)  # 分解时、分、秒
-    elif len(time_part) == 2: hours, minutes, seconds = 0, int(time_part[0]), int(time_part[1])
-    elif len(time_part) == 1: hours, minutes, seconds = 0, 0, int(time_part[0])
-    # 计算总秒数
+    if len(time_part) == 3:
+        hours, minutes, seconds = map(int, time_part)
+    elif len(time_part) == 2:
+        hours, minutes, seconds = 0, int(time_part[0]), int(time_part[1])
+    elif len(time_part) == 1:
+        hours, minutes, seconds = 0, 0, int(time_part[0])
     total_seconds = int(days) * 24 * 3600 + hours * 3600 + minutes * 60 + seconds
     return total_seconds
 
-
 def get_squeue_sort_func(key):
-    sort_dict = {"j":8, "a":40, "e":9, "u":19, "s":18, "t":37, "l":11, "c":27, "m":12, "g":1, "q":16, "p":41, "n":42}
+    sort_dict = {"j": 8, "a": 40, "e": 9, "u": 19, "s": 18, "t": 37, "l": 11, "c": 27, "m": 12, "g": 1, "q": 16, "p": 41, "n": 42}
     idx = sort_dict.get(key.lower()[-1], 8)
     if key in 'tl':
-        # 处理时间格式
-        return lambda x:get_second(x[idx])
+        return lambda x: get_second(x[idx])
     elif key in 'cmgp':
-        # 处理数字格式
-        return lambda x:int(x[idx])
+        return lambda x: int(x[idx])
     elif key == 'a':
-        # 处理队列
-        return lambda x:get_partition_order(x[idx])
+        return lambda x: get_partition_order(x[idx])
     elif key == 'n':
-        # 处理nodelist(reason)
-        return lambda x:get_nodelist_order(x[idx])
+        return lambda x: get_nodelist_order(x[idx])
     elif key == 'j':
-        # 处理jobid
-        return lambda x:get_job_order(x[idx])
+        return lambda x: get_job_order(x[idx])
     else:
-        return lambda x:x[idx]
-
+        return lambda x: x[idx]
 
 def print_node_resource_cpu(stdscr, result, start_y, full=False):
     height, width = stdscr.getmaxyx()
     if start_y >= width:
-        return start_y+1
-    # length: 7/26
+        return start_y + 1
     start_x = 1
-    full = full and width > 2*(start_y+20+1)
+    full = full and width > 2 * (start_y + 20 + 1)
     if full:
-        # 位置充足时，输出[|||20|||]xxx/xxx
         for idx in range(len(result)):
             if start_x + idx >= height:
                 break
             alloc_cpu = result[idx]['alloc']['cpu']
             all_cpu = result[idx]['cfg']['cpu']
+            if all_cpu <= 0:
+                continue
             color = get_alloc_color(alloc_cpu, all_cpu)
-            count = int(1.0*alloc_cpu/all_cpu*20)
-            if alloc_cpu > 0 and count == 0: count = 1
-            if alloc_cpu < all_cpu and count == 20: count = 19
+            count = int(1.0 * alloc_cpu / all_cpu * 20)
+            if alloc_cpu > 0 and count == 0:
+                count = 1
+            if alloc_cpu < all_cpu and count == 20:
+                count = 19
             stdscr.addstr(start_x + idx, start_y, '[', curses.color_pair(1))
-            stdscr.addstr(start_x + idx, start_y+1, "|"*count, curses.color_pair(color))
-            cpu_ratio = int(100.0*alloc_cpu/all_cpu)
-            if alloc_cpu > 0 and cpu_ratio == 0: cpu_ratio = "<1"
-            if alloc_cpu < all_cpu and cpu_ratio == 100: cpu_ratio = 99
-            stdscr.addstr(start_x + idx, start_y+21, '{:>3.3}%'.format(str(cpu_ratio)), curses.color_pair(1))
-            stdscr.addstr(start_x + idx, start_y+21+4, ']', curses.color_pair(1))
+            stdscr.addstr(start_x + idx, start_y + 1, "|" * count, curses.color_pair(color))
+            cpu_ratio = int(100.0 * alloc_cpu / all_cpu)
+            if alloc_cpu > 0 and cpu_ratio == 0:
+                cpu_ratio = "<1"
+            if alloc_cpu < all_cpu and cpu_ratio == 100:
+                cpu_ratio = 99
+            stdscr.addstr(start_x + idx, start_y + 21, '{:>3.3}%'.format(str(cpu_ratio)), curses.color_pair(1))
+            stdscr.addstr(start_x + idx, start_y + 21 + 4, ']', curses.color_pair(1))
     else:
-        # 位置不足时，只输出xxx/xxx
         for idx in range(len(result)):
             if start_x + idx >= height:
                 break
@@ -297,37 +317,26 @@ def print_node_resource_cpu(stdscr, result, start_y, full=False):
             all_cpu = result[idx]['cfg']['cpu']
             color = get_alloc_color(alloc_cpu, all_cpu)
             stdscr.addstr(start_x + idx, start_y, "{:>3}/".format(str(alloc_cpu)), curses.color_pair(color))
-            stdscr.addstr(start_x + idx, start_y+4, "{:<3}".format(str(all_cpu)), curses.color_pair(1))
-    
-    return start_y+26+1 if full else start_y+7+1
-
+            stdscr.addstr(start_x + idx, start_y + 4, "{:<3}".format(str(all_cpu)), curses.color_pair(1))
+    return start_y + 26 + 1 if full else start_y + 7 + 1
 
 def print_node_resource_gpu(stdscr, result, start_y, full=False):
     height, width = stdscr.getmaxyx()
-    # length: 3/10
-    # " □ ■"
     start_x = 1
-    full = full and width > 1.5*(start_y+10+1)
+    full = full and width > 1.5 * (start_y + 10 + 1)
     if full:
-        # 位置充足时，输出[■■■■□□□□]
         for idx in range(len(result)):
             if start_x + idx >= height:
                 break
             alloc_gpu = result[idx]['alloc']['gpu']
             all_gpu = result[idx]['cfg']['gpu']
-            color = get_alloc_color(alloc_gpu, all_gpu)
             if all_gpu == 0:
                 continue
-            # stdscr.addstr(start_x + idx, start_y, "[", curses.color_pair(1))
-            # stdscr.addstr(start_x + idx, start_y+1, "■"*alloc_gpu+"□"*(all_gpu-alloc_gpu), curses.color_pair(1))
-            # stdscr.addstr(start_x + idx, start_y+1+9, str(alloc_gpu), curses.color_pair(color))
-            # stdscr.addstr(start_x + idx, start_y+1+9+1, "/{}]".format(str(all_gpu)), curses.color_pair(1))
+            color = get_alloc_color(alloc_gpu, all_gpu)
             stdscr.addstr(start_x + idx, start_y, "[", curses.color_pair(1))
-            stdscr.addstr(start_x + idx, start_y+1, "■"*alloc_gpu+"□"*(all_gpu-alloc_gpu), curses.color_pair(color))
-            stdscr.addstr(start_x + idx, start_y+1+all_gpu, ']', curses.color_pair(1))
-            
+            stdscr.addstr(start_x + idx, start_y + 1, "■" * alloc_gpu + "□" * (all_gpu - alloc_gpu), curses.color_pair(color))
+            stdscr.addstr(start_x + idx, start_y + 1 + all_gpu, ']', curses.color_pair(1))
     else:
-        # 位置不足时，输出x/x
         for idx in range(len(result)):
             if start_x + idx >= height:
                 break
@@ -339,349 +348,207 @@ def print_node_resource_gpu(stdscr, result, start_y, full=False):
                 alloc_gpu = '-'
                 color = 1
             stdscr.addstr(start_x + idx, start_y, str(alloc_gpu), curses.color_pair(color))
-            stdscr.addstr(start_x + idx, start_y+1, "/{}".format(str(all_gpu)), curses.color_pair(1))
-    
-    return start_y+10+1 if full else start_y+3+1
-
+            stdscr.addstr(start_x + idx, start_y + 1, "/{}".format(str(all_gpu)), curses.color_pair(1))
+    return start_y + 10 + 1 if full else start_y + 3 + 1
 
 def print_node_resource_mem(stdscr, result, start_y, full=False):
     height, width = stdscr.getmaxyx()
     if start_y >= width:
-        return start_y+1
-    # length: 4/26
+        return start_y + 1
     start_x = 1
-    full = full and width > 2*(start_y+26+1)
+    full = full and width > 2 * (start_y + 26 + 1)
     if full:
-        # 位置充足时，输出[||||10|||| xxx/xxxG]
         for idx in range(len(result)):
             if start_x + idx >= height:
                 break
             alloc_mem = result[idx]['alloc']['mem']
             all_mem = result[idx]['cfg']['mem']
+            if all_mem <= 0:
+                continue
             color = get_alloc_color(alloc_mem, all_mem)
-            count = int(1.0*alloc_mem/all_mem*16)
-            if alloc_mem > 0 and count == 0: count = 1
+            count = int(1.0 * alloc_mem / all_mem * 16)
+            if alloc_mem > 0 and count == 0:
+                count = 1
             stdscr.addstr(start_x + idx, start_y, '[', curses.color_pair(1))
-            stdscr.addstr(start_x + idx, start_y+1, "|"*count, curses.color_pair(color))
-            stdscr.addstr(start_x + idx, start_y+1+16, "{:>3}/{}G]".format(str(alloc_mem), str(all_mem)), curses.color_pair(1))
-            
+            stdscr.addstr(start_x + idx, start_y + 1, "|" * count, curses.color_pair(color))
+            stdscr.addstr(start_x + idx, start_y + 1 + 16, "{:>3}/{}G]".format(str(alloc_mem), str(all_mem)), curses.color_pair(1))
     else:
-        # 位置不足时，输出xxx%
         for idx in range(len(result)):
             if start_x + idx >= height:
                 break
             alloc_mem = result[idx]['alloc']['mem']
             all_mem = result[idx]['cfg']['mem']
-            mem_ratio = int(100.0*alloc_mem/all_mem)
-            if alloc_mem > 0 and mem_ratio == 0: mem_ratio = "<1"
-            if alloc_mem < all_mem and mem_ratio == 100: mem_ratio = ">99"
-            stdscr.addstr(start_x + idx, start_y, '{:>3.3}%'.format(str(mem_ratio)), curses.color_pair(1))
-
-    return start_y+26+1 if full else start_y+4+1
-
-
-def print_running_job_on_each_node(stdscr, result, start_y):
-    height, width = stdscr.getmaxyx()
-    start_x = 1
-    nodelist = [res['nodename'] for res in result]
-    multi_node_job_color_map = {}
-    multi_node_job_counter = 0
-    multi_node_job_color_list = (3, 6, 7)
-    for idx, node in enumerate(nodelist):
-        command = "squeue --sort=i --Format=JobID,PriorityLong,NodeList --nodelist={}".format(node)
-        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
-        if process.returncode == 0:
-            data = stdout.decode('utf-8')
-            lines = data.strip().split('\n')
-            # 输出节点状态，当节点正常(MIXED, ALLOCATED)时不输出，当节点为IDLE时输出IDLE。
-            start_y_origin = start_y
-            state = result[idx]['state']
-            if 'DOWN' in state or 'FAIL' in state:
-                color = 13 # 白字红底
-            elif 'RESUME' in state or 'UNDRAIN' in state or 'COMPLETING' in state:
-                color = 10 # 黑字白底
-            elif 'DRAIN' in state or 'NOT_RESPONDING' in state:
-                color = 2 # 红字黑底
-            elif 'FUTURE' in state or 'CANCEL_REBOOT' in state:
-                color = 5 # 黄字黑底
-            elif 'IDLE' in state:
-                color = 4 # 绿字黑底
-            elif 'ALLOCATED' in state or 'MIXED' in state:
-                color = 7 # 品红黑底
+            if all_mem <= 0:
+                mem_ratio = "N/A"
             else:
-                color = 1 # 白字黑底
-            
-            if color != 7:
-                stdscr.addstr(start_x + idx, start_y, "*{}*".format(state), curses.color_pair(color))
-                start_y += len(state)+3
-            if len(lines) > 1:
-                extra_y = 0
-                for i, line in enumerate(lines[1:]):
-                    line = line.split()
-                    priority = int(line[1])
-                    if priority <= 1000:
-                        color = 1 # 白字黑底
-                    elif priority <= 1500:
-                        color = 5 # 黄字黑底
-                    elif priority <= 2000:
-                        color = 8 # 白字绿底
-                    else:
-                        color = 11 # 白字青底
-                    if '[' in line[2]:
-                        job_ids = int(line[0])
-                        if job_ids not in multi_node_job_color_map:
-                            multi_node_job_color_map[job_ids] = multi_node_job_color_list[multi_node_job_counter]
-                            multi_node_job_counter = (multi_node_job_counter + 1) % len(multi_node_job_color_list)
-                        color = multi_node_job_color_map[job_ids]
+                mem_ratio = int(100.0 * alloc_mem / all_mem)
+                if alloc_mem > 0 and mem_ratio == 0:
+                    mem_ratio = "<1"
+                if alloc_mem < all_mem and mem_ratio == 100:
+                    mem_ratio = ">99"
+            stdscr.addstr(start_x + idx, start_y, '{:>3.3}%'.format(str(mem_ratio)), curses.color_pair(1))
+    return start_y + 26 + 1 if full else start_y + 4 + 1
 
-                    stdscr.addstr(start_x + idx, start_y + extra_y, line[0], curses.color_pair(color))
-                    extra_y += len(line[0]) + 1
-                    if start_y + extra_y >= width:
-                        break
-            start_y = start_y_origin
-        else:
-            stdscr.addstr(start_x + idx, start_y, stderr.decode('utf-8'), curses.color_pair(2))
-
-
-def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sort_flag=True):
-    global DEBUG_MODE
-
-    height, width = stdscr.getmaxyx()
-    clear_flag = False
-    command = "squeue --format='%all' --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
+# -----------------------------
+# 把“阻塞获取数据”改成 collect_*（后台跑）
+# -----------------------------
+def collect_savai():
+    command = "scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
-    if process.returncode == 0:
-        data = stdout.decode('utf-8')
-        lines = data.strip().split('\n')
-        lines = [str(line) for line in lines]
-        data = [line.split('|') for line in lines][1:]
-        
-        # 0-4   ACCOUNT       TRES_PER_NODE MIN_CPUS         MIN_TMP_DISK     END_TIME
-        # 5-9   FEATURES      GROUP         OVER_SUBSCRIBE   JOBID            NAME
-        # 10-14 COMMENT       TIME_LIMIT    MIN_MEMORY       REQ_NODES        COMMAND
-        # 15-19 PRIORITY      QOS           REASON           ST               USER
-        # 20-24 RESERVATION   WCKEY         EXC_NODES        NICE             S:C:T
-        # 25-29 JOBID         EXEC_HOST     CPUS             NODES            DEPENDENCY
-        # 30-34 ARRAY_JOB_ID  GROUP         SOCKETS_PER_NODE CORES_PER_SOCKET THREADS_PER_CORE
-        # 35-39 ARRAY_TASK_ID TIME_LEFT     TIME             NODELIST         CONTIGUOUS
-        # 40-44 PARTITION     PRIORITY      NODELIST(REASON) START_TIME       STATE
-        # 45-49 UID           SUBMIT_TIME   LICENSES         CORE_SPEC        SCHEDNODES
-        # 50    WORK_DIR
-        
-        # JOBID PARTITION NAME USER ST TIME TIME-LIMIT CPU MEM GPU QOS PRIORITY NODELIST(REASON)
-        # 8     40        9    19   18 37   11         27  12  1   16  41       42
-        title_list = ['JOBID', "PARTITION", "NAME", "USER", "ST", 
-                      "TIME", "TIME-LIMIT", "CPU", "MEM", "GPU", 
-                      "QOS", "PRIOR", "NODELIST(REASON)"]
-        show_list = [8,40,9,19,18,37,11,27,12,1,16,41,42]
-        # 处理MEM和GPU
-        command = "squeue --Format=jobid,tres-alloc:50 --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
-        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
-        if process.returncode == 0:
-            lines = stdout.decode('utf-8').strip().split('\n')[1:]
-            tres_alloc = {}
-            for line in lines:
-                line = line.split()
-                if len(line) == 2:
-                    tres_mem = line[1].split(',')[1]
-                    if tres_mem.endswith('G'): tres_mem = tres_mem[4:-1]
-                    elif tres_mem.endswith('M'): tres_mem = str(int(tres_mem[4:-1])//1024)
-                    tres_alloc[line[0]] = tres_mem
-            for idx in range(len(data)):
-                data[idx][12] = tres_alloc.get(data[idx][25], "42")
-                gpus = data[idx][1]
-                if gpus == 'N/A':
-                    data[idx][1] = '0'
-                else:
-                    data[idx][1] = gpus.split(':')[-1]
-        else:
-            for idx in range(len(data)):
-                if data[idx][12].endswith('G'): data[idx][12] = data[idx][12][:-1]
-                elif data[idx][12].endswith('M'): data[idx][12] = str(int(data[idx][12][:-1])//1024)
-                gpus = data[idx][1]
-                data[idx][1] = gpus.split(':')[-1]
-        # 对于多卡任务，cpu/mem/gpu需要乘上节点数
-        for idx in range(len(data)):
-            if int(data[idx][28]) > 1:
-                nnodes = int(data[idx][28])
-                data[idx][28] = str(int(data[idx][27]) * nnodes)
-                data[idx][12] = str(int(float(data[idx][12]) * nnodes))
-                data[idx][1] = str(int(data[idx][1]) * nnodes)
-        # 排序
-        data.sort(key=get_squeue_sort_func(sort.lower()[-1]), reverse=sort.startswith('-'))
-        data = data[:max_line]
+    if process.returncode != 0:
+        return stderr.decode('utf-8')
 
-        if len(data) == 0:
-            return None
+    data = stdout.decode('utf-8')
+    lines = data.strip().split('\n')
+    result = []
+    node_pattern = re.compile(r'NodeName=(\w+)')
+    state_pattern = re.compile(r'   State=([\w\+]+)')
+    cfg_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),billing=\d+,gres/gpu=(\d+)')
+    alloc_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),gres/gpu=(\d+)')
 
-        # 统计每个条目的最大长度
-        align_length = [max([len(data[i][j]) for i in range(len(data))]) for j in show_list]
-        # 不少于数据标题长度
-        align_length = [max(align_length[i], len(title_list[i])) for i in range(len(show_list))]
-        # # 手动调整某些项目的长度
-        # # CPU, MEM, GPU
-        # align_length[7] = 3
-        # align_length[8] = 3
-        # align_length[9] = 3
-        # # TIME, TIME-LIMIT
-        # align_length[5] = 11
-        # align_length[6] = 11
-
-        # 设置对齐格式
-        formation = ("{{:>{}}} "*(len(align_length)-1) + "{{:<{}}}").format(*align_length)
-
-        # 判断每行内容是否有所更改
-        output_flags = [True] * len(data)
-        if old_data is None:
-            change_sort_flag = True
-        else:
-            old_align_length, old_data = old_data
-            if len(old_data) != len(data):
-                clear_flag = True
-            elif sum([old_align_length[i] != align_length[i] for i in range(len(align_length))]):
-                change_sort_flag = True
-            elif len(data)>20:
-                for idx in range(min(len(data), len(old_data))):
-                    output = [data[idx][i] for i in show_list]
-                    if old_data[idx] == formation.format(*output)[:width-1]:
-                        output_flags[idx] = False
-        # 清除旧数据
-        if clear_flag:
-            stdscr.erase()
-        if change_sort_flag:
-            stdscr.clear()
-            old_data = None
-            output_flags = [True] * len(data)
-        # 打印内容
-        print_data = []
-        for idx, line in enumerate(data):
-            output = [line[i] for i in show_list]
-            print_data.append(formation.format(*output)[:width-1])
-            if output_flags[idx]:
-                stdscr.addstr(start_x+idx+1, 0, formation.format(*output)[:width-1], curses.color_pair(1 if not DEBUG_MODE else random.randint(1,7)))
-
-        if clear_flag or change_sort_flag:
-            # 打印标题
-            stdscr.addstr(start_x, 0, formation.format(*title_list), curses.color_pair(9))
-            # 整理排序快捷键
-            sort_key = [("J",0),("A",1),("E",3),("U",0),("S",0),
-                        ("T",0),("L",5),("C",0),("M",0),("G",0),
-                        ("Q",0),("P",0),("N",0)]
-            y = 0
-            for idx, (char, i) in enumerate(sort_key[:-1]):
-                y += align_length[idx] - len(title_list[idx]) + i
-                if y >= width:
-                    break
-                stdscr.addstr(start_x, y, char, curses.color_pair(9)|curses.A_UNDERLINE)
-                y += len(title_list[idx]) - i
-                y += 1
+    for line in lines:
+        if 'CfgTRES' in line:
+            match = cfg_pattern.match(line)
+            if match:
+                cpu, mem, mem_unit, gpu = match.groups()
+                result[-1]['cfg']['cpu'] = int(cpu)
+                mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem) / 102.4) // 10
+                mem_value -= 10
+                result[-1]['cfg']['mem'] = mem_value
+                result[-1]['cfg']['gpu'] = int(gpu)
             else:
-                char, i = sort_key[-1]
-                if y+i < width:
-                    stdscr.addstr(start_x, y+i, char, curses.color_pair(9)|curses.A_UNDERLINE)
-            # 突出当前排序
-            for idx, char in enumerate(sort_key[:-1]):
-                char = char[0].lower()
-                if char == sort.lower()[-1]:
-                    stdscr.addstr(start_x, sum(align_length[:idx+1])+idx-len(title_list[idx]), title_list[idx], curses.color_pair(12))
-                    stdscr.addstr(start_x, sum(align_length[:idx+1])+idx-len(title_list[idx])+sort_key[idx][1], sort_key[idx][0], curses.color_pair(12)|curses.A_UNDERLINE)
-                    break
+                cfg_cpu_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG]),billing=\d+')
+                match = cfg_cpu_pattern.match(line)
+                if match:
+                    cpu, mem, mem_unit = match.groups()
+                    result[-1]['cfg']['cpu'] = int(cpu)
+                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem) / 102.4) // 10
+                    mem_value -= 128
+                    result[-1]['cfg']['mem'] = mem_value
+        elif 'AllocTRES' in line:
+            match = alloc_pattern.match(line)
+            if match:
+                cpu, mem, mem_unit, gpu = match.groups()
+                result[-1]['alloc']['cpu'] = int(cpu)
+                mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem) / 102.4) // 10
+                result[-1]['alloc']['mem'] = mem_value
+                result[-1]['alloc']['gpu'] = int(gpu)
             else:
-                # 如果没有break，会到这里
-                stdscr.addstr(start_x, sum(align_length[:-1])+idx+1, title_list[-1], curses.color_pair(12))
-                stdscr.addstr(start_x, sum(align_length[:-1])+idx+1+sort_key[-1][1], sort_key[-1][0], curses.color_pair(12)|curses.A_UNDERLINE)
-        return align_length, print_data
+                alloc_cpu_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+?\.?\d+)([MG])')
+                match = alloc_cpu_pattern.match(line)
+                if match:
+                    cpu, mem, mem_unit = match.groups()
+                    result[-1]['alloc']['cpu'] = int(cpu)
+                    mem_value = int(float(mem)) if mem_unit == 'G' else int(float(mem) / 102.4) // 10
+                    result[-1]['alloc']['mem'] = mem_value
+        elif 'NodeName' in line:
+            match = node_pattern.match(line)
+            if match:
+                nodename = match.group(1)
+                result.append({'nodename': nodename, 'state': 'UNKNOWN',
+                               'alloc': {'cpu': 0, 'mem': 0, 'gpu': 0},
+                               'cfg': {'cpu': 0, 'mem': 0, 'gpu': 0}})
+        elif 'State' in line:
+            match = state_pattern.match(line)
+            if match:
+                state = match.group(1)
+                result[-1]['state'] = state
+    return result
 
-    else:
-        stdscr.addstr(start_x+1, 0, stderr.decode('utf-8'), curses.color_pair(2))
-        return None
+def collect_all_job_states():
+    command = "squeue --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO --sort=t|awk '{print $5}'"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        return {"err": stderr.decode("utf-8")}
+    data = stdout.decode('utf-8')
+    lines = data.strip().split('\n')
+    job_state = lines[1:]
+    job_state = dict(Counter(job_state))
+    total = len(lines[1:])
+    subset = sum(job_state.get(s, 0) for s in ['R', 'PD', 'CD', 'CA', 'F'])
+    return {"states": job_state, "total": total, "subset": subset}
 
+def collect_online_user_msg():
+    # 只在 ROOT 时有意义；非 ROOT 返回空字符串，渲染端会跳过
+    if os.geteuid() != 0:
+        return ""
+    command = "bash /root/ssh_online.sh"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, _ = process.communicate()
+    if process.returncode != 0:
+        return "U ?/?"
+    data = stdout.decode('utf-8')
+    lines = data.strip().split('\n')[1:]
+    local = sum([1 for line in lines if '192.168.105.12' in line])
+    return f"U {len(lines)}/{local}"
 
-# storage load
-def print_storage_usage(stdscr, start_x, start_y=0):
+def collect_storage_usage():
     storage_paths = ['/home', '/data0', '/data1', '/data2', '/data3']
-    stdscr.addstr(start_x, start_y, 'Storage usage:', curses.color_pair(6))
-    start_y += 15
-    for storage_path in storage_paths:
-        if os.path.exists(storage_path):
-            usage = shutil.disk_usage(storage_path)
-            percent = usage.used / usage.total * 100
-            stdscr.addstr(start_x, start_y, storage_path, curses.color_pair(6)|curses.A_BOLD)
-            start_y += len(storage_path) + 1
-            stdscr.addstr(start_x, start_y, f"{percent:.1f}%", curses.color_pair(1))
-            start_y += 6
+    out = {}
+    for p in storage_paths:
+        if os.path.exists(p):
+            u = shutil.disk_usage(p)  # 可能卡 NFS
+            percent = u.used / u.total * 100 if u.total else 0.0
+            out[p] = percent
+    return out
 
+def make_net_speed_collector(interface_name):
+    prev = None
+    prev_t = None
 
-# interfaces monitor and system load monitor
-def get_bytes(interfaces):
-    data = {}
-    with open('/proc/net/dev') as f:
-        for line in f:
-            line = line.strip()
-            for iface in interfaces:
-                if line.startswith(iface + ":"):
-                    parts = line.split(f"{iface}:")[1].split()
-                    recv = int(parts[0])
-                    sent = int(parts[8])
-                    data[iface] = (recv, sent)
-    return data
+    def get_bytes(interfaces):
+        data = {}
+        with open('/proc/net/dev') as f:
+            for line in f:
+                line = line.strip()
+                for iface in interfaces:
+                    if line.startswith(iface + ":"):
+                        parts = line.split(f"{iface}:")[1].split()
+                        recv = int(parts[0])
+                        sent = int(parts[8])
+                        data[iface] = (recv, sent)
+        return data
 
-def format_speed(bytes_per_sec):
-    # max return length: 12
-    # 最多保留两位小数，最多5位
-    # if bytes_per_sec < 100:
-    #     return f"{bytes_per_sec:>5.2f} B/s"
-    # if bytes_per_sec < 1000:
-    #     return f"{bytes_per_sec:>5.1f} B/s"
-    kb = bytes_per_sec / 1024
-    if kb < 100:
-        return f"{kb:>5.2f} KB/s"
-    if kb < 1000:
-        return f"{kb:>5.1f} KB/s"
-    mb = kb / 1024
-    if mb < 100:
-        return f"{mb:>5.2f} MB/s"
-    if mb < 1000:
-        return f"{mb:>5.1f} MB/s"
-    gb = mb / 1024
-    return f"{gb:>5.2f} GB/s"
+    def format_speed(bytes_per_sec):
+        kb = bytes_per_sec / 1024
+        if kb < 100:
+            return f"{kb:>5.2f} KB/s"
+        if kb < 1000:
+            return f"{kb:>5.1f} KB/s"
+        mb = kb / 1024
+        if mb < 100:
+            return f"{mb:>5.2f} MB/s"
+        if mb < 1000:
+            return f"{mb:>5.1f} MB/s"
+        gb = mb / 1024
+        return f"{gb:>5.2f} GB/s"
 
-def print_web_speed(stdscr, start_x, start_y, prev_data, interface_name, interval=1):
-    curr_data = get_bytes(interface_name)
-    if prev_data is None:
-        return curr_data
-    for iface in interface_name:
-        recv_diff = curr_data[iface][0] - prev_data[iface][0]
-        sent_diff = curr_data[iface][1] - prev_data[iface][1]
-        recv_speed = recv_diff / interval
-        sent_speed = sent_diff / interval
-        speed = f"{format_speed(sent_speed)}⬆ {format_speed(recv_speed)}⬇"
-        stdscr.addstr(start_x, start_y, iface+':', curses.color_pair(4)|curses.A_BOLD)
-        start_y += len(iface) + 1
-        stdscr.addstr(start_x, start_y, speed, curses.color_pair(1))
-        start_y += len(speed) + 2
-    return curr_data
+    def collector():
+        nonlocal prev, prev_t
+        curr = get_bytes(interface_name)
+        now = time.time()
 
+        # 第一次没有 prev，返回 0 速率，但会记录状态
+        if prev is None or prev_t is None:
+            prev, prev_t = curr, now
+            return {iface: "0.00 KB/s⬆ 0.00 KB/s⬇" for iface in interface_name}
 
-# print system average load
-def format_sysload(load_avg):
-    if load_avg < 10:
-        return f"{load_avg:.2f}"
-    if load_avg < 100:
-        return f"{load_avg:.1f}"
-    return f"{load_avg:.0f}"
+        interval = max(1e-6, now - prev_t)
+        out = {}
+        for iface in interface_name:
+            if iface not in curr or iface not in prev:
+                out[iface] = "0.00 KB/s⬆ 0.00 KB/s⬇"
+                continue
+            recv_diff = curr[iface][0] - prev[iface][0]
+            sent_diff = curr[iface][1] - prev[iface][1]
+            out[iface] = f"{format_speed(sent_diff/interval)}⬆ {format_speed(recv_diff/interval)}⬇"
 
-def print_average_load(stdscr, start_x, start_y):
-    # length: 25
-    load_avg = os.getloadavg()
-    stdscr.addstr(start_x, start_y, "Load average:", curses.color_pair(6))
-    stdscr.addstr(start_x, start_y+13, f"{format_sysload(load_avg[0])}", curses.color_pair(1)|curses.A_BOLD)
-    stdscr.addstr(start_x, start_y+18, f"{format_sysload(load_avg[1])} {format_sysload(load_avg[2])}", curses.color_pair(6))
-    if ROOT:
-        kill_over_load_job_auto()
+        prev, prev_t = curr, now
+        return out
+
+    return collector
 
 def username_of(uid):
     try:
@@ -690,12 +557,8 @@ def username_of(uid):
         return str(uid)
 
 def collect_ps_info(interval_sec):
-    """
-    返回：pid -> dict(cpu_percent=float, user=str, cmdline=str)
-    """
     procs = {p.pid: p for p in psutil.process_iter(attrs=["pid", "username", "cmdline"])}
 
-    # 先 prime 一次 cpu_percent
     for p in procs.values():
         try:
             p.cpu_percent(None)
@@ -707,7 +570,7 @@ def collect_ps_info(interval_sec):
     out = {}
     for pid, p in procs.items():
         try:
-            cpu = p.cpu_percent(None)  # 与上次调用间隔期间的平均 CPU%
+            cpu = p.cpu_percent(None)
             u = p.uids().real if hasattr(p, "uids") else None
             user = p.username() if p.info.get("username") is None else p.info["username"]
             if user is None and u is not None:
@@ -721,26 +584,18 @@ def collect_ps_info(interval_sec):
     return out
 
 def looks_like_vscode_task(proc):
-    """
-    排除规则：
-    - 进程的 cwd/cmdline/path 中包含 '/.vscode/'
-    - 命令行中包含类似 'vscode-server' / VSCode 扩展运行路径（常见于 ~/.vscode）
-    """
     patterns = [".vscode", "vscode-server", "VSCode", ".cursor", "cursor-server"]
     try:
-        # cwd
         cwd = ""
         try:
             cwd = proc.cwd() or ""
         except Exception:
             pass
-        # exe path
         exe = ""
         try:
             exe = proc.exe() or ""
         except Exception:
             pass
-        # cmdline
         cmdline = " ".join(proc.cmdline()) if proc.cmdline() else ""
         hay = " ".join([cwd, exe, cmdline]).lower()
         return any(p.lower() in hay for p in patterns)
@@ -752,11 +607,8 @@ def get_overload_job():
 
     rows = []
     for pid, info in ps_info.items():
-        # 过滤掉 root
         if info.get("user") in ("root", "0"):
             continue
-
-        # 过滤 VSCode 任务
         try:
             proc = psutil.Process(pid)
             if looks_like_vscode_task(proc):
@@ -767,22 +619,11 @@ def get_overload_job():
             pass
 
         cpu = info.get("cpu_percent", 0.0)
-
         tx_mbps = rx_mbps = 0.0
-
         over_cpu = cpu >= 100
-
         if over_cpu:
-            rows.append((
-                pid,
-                info.get("user", "?"),
-                cpu,
-                tx_mbps,
-                rx_mbps,
-                info.get("cmdline", "")
-            ))
+            rows.append((pid, info.get("user", "?"), cpu, tx_mbps, rx_mbps, info.get("cmdline", "")))
 
-    # 排序：优先网络（TX+RX），再 CPU
     def sort_key(r):
         _, _, cpu, tx, rx, _ = r
         return (tx + rx, cpu)
@@ -790,214 +631,615 @@ def get_overload_job():
     rows.sort(key=sort_key, reverse=True)
     return rows
 
-def kill_over_load_job_auto():
-    if not ROOT:
-        return
+def collect_kill_overload_and_log():
+    """
+    保持你原本功能：ROOT 且 load_avg[0]>50 时 kill CPU>=100 的进程
+    返回最后一条 LOGS（字符串）
+    """
+    if os.geteuid() != 0:
+        return ""
+
     overload_job_list = get_overload_job()
-    global LOGS
+    logs = ""
     for job in overload_job_list:
-        LOGS = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]pid {job[0]}, User {job[1]}, Cmd {job[-1]}"
+        logs = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]pid {job[0]}, User {job[1]}, Cmd {job[-1]}"
         load_avg = os.getloadavg()
         if load_avg[0] > 50:
-            os.kill(job[0],9)
-            LOGS = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Kill {job[0]}, User {job[1]}, Cmd {job[-1]}"
+            try:
+                os.kill(job[0], 9)
+                logs = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Kill {job[0]}, User {job[1]}, Cmd {job[-1]}"
+            except Exception:
+                pass
+    return logs
 
+def format_sysload(load_avg):
+    if load_avg < 10:
+        return f"{load_avg:.2f}"
+    if load_avg < 100:
+        return f"{load_avg:.1f}"
+    return f"{load_avg:.0f}"
+
+# ---- 采集 “job table” ：把你 print_job_data 的“获取数据部分”搬到后台，渲染端只打印字符串 ----
+def collect_job_table(sort_key, max_line, width):
+    """
+    返回 dict:
+      {
+        "header": str,
+        "lines": [str, ...],
+        "align_length": [...],
+        "title_list": [...],
+        "sort": sort_key
+      }
+    """
+    command = "squeue --format='%all' --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        return {"err": stderr.decode("utf-8")}
+
+    data = stdout.decode('utf-8')
+    lines = data.strip().split('\n')
+    lines = [str(line) for line in lines]
+    data = [line.split('|') for line in lines][1:]
+
+    if len(data) == 0:
+        return {"header": "", "lines": [], "sort": sort_key}
+
+    title_list = ['JOBID', "PARTITION", "NAME", "USER", "ST",
+                  "TIME", "TIME-LIMIT", "CPU", "MEM", "GPU",
+                  "QOS", "PRIOR", "NODELIST(REASON)"]
+    show_list = [8, 40, 9, 19, 18, 37, 11, 27, 12, 1, 16, 41, 42]
+
+    # 处理 MEM / GPU：保持你原逻辑
+    command = "squeue --Format=jobid,tres-alloc:50 --state=BF,CA,CD,CF,CG,DL,F,NF,OOM,PD,PR,R,RD,RF,RH,RQ,RS,RV,SI,SE,SO,ST,S,TO"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout2, stderr2 = process.communicate()
+    if process.returncode == 0:
+        lines2 = stdout2.decode('utf-8').strip().split('\n')[1:]
+        tres_alloc = {}
+        for line in lines2:
+            line = line.split()
+            if len(line) == 2:
+                tres_mem = line[1].split(',')[1]
+                if tres_mem.endswith('G'):
+                    tres_mem = tres_mem[4:-1]
+                elif tres_mem.endswith('M'):
+                    tres_mem = str(int(tres_mem[4:-1]) // 1024)
+                tres_alloc[line[0]] = tres_mem
+        for idx in range(len(data)):
+            data[idx][12] = tres_alloc.get(data[idx][25], "42")
+            gpus = data[idx][1]
+            if gpus == 'N/A':
+                data[idx][1] = '0'
+            else:
+                data[idx][1] = gpus.split(':')[-1]
+    else:
+        for idx in range(len(data)):
+            if data[idx][12].endswith('G'):
+                data[idx][12] = data[idx][12][:-1]
+            elif data[idx][12].endswith('M'):
+                data[idx][12] = str(int(data[idx][12][:-1]) // 1024)
+            gpus = data[idx][1]
+            data[idx][1] = gpus.split(':')[-1]
+
+    # 多节点任务乘节点数（保持你原逻辑）
+    for idx in range(len(data)):
+        try:
+            if int(data[idx][28]) > 1:
+                nnodes = int(data[idx][28])
+                data[idx][28] = str(int(data[idx][27]) * nnodes)
+                data[idx][12] = str(int(float(data[idx][12]) * nnodes))
+                data[idx][1] = str(int(data[idx][1]) * nnodes)
+        except Exception:
+            pass
+
+    data.sort(key=get_squeue_sort_func(sort_key.lower()[-1]), reverse=sort_key.startswith('-'))
+    data = data[:max_line]
+
+    # 对齐
+    align_length = [max([len(data[i][j]) for i in range(len(data))]) for j in show_list]
+    align_length = [max(align_length[i], len(title_list[i])) for i in range(len(show_list))]
+    formation = ("{{:>{}}} " * (len(align_length) - 1) + "{{:<{}}}").format(*align_length)
+
+    header = formation.format(*title_list)
+    out_lines = []
+    for line in data:
+        output = [line[i] for i in show_list]
+        out_lines.append(formation.format(*output)[:width - 1])
+
+    return {
+        "header": header[:width - 1],
+        "lines": out_lines,
+        "align_length": align_length,
+        "title_list": title_list,
+        "sort": sort_key,
+        "formation": formation,
+    }
+
+# ---- multi-node / per-node job list（原来每秒对每个节点跑一次 squeue，非常重，移到后台） ----
+def collect_running_jobs_on_nodes(nodelist):
+    """
+    返回 dict: nodename -> {"state": state_str, "jobs": [(jobid, priority, nodelist_str), ...]}
+    """
+    # 注意：state 不在这里取，渲染时用 savai 的 state；这里只采 job 列表
+    out = {}
+    command = "squeue --sort=i --Format=JobID,PriorityLong,NodeList"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, _ = process.communicate()
+    if process.returncode != 0:
+        return {}
+
+    lines = stdout.decode('utf-8').strip().split('\n')
+    if len(lines) > 1:
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) >= 3:
+                if parts[2] not in out:
+                    out[parts[2]] = []
+                out[parts[2]].append((parts[0], parts[1], parts[2]))
+    return out
+
+# -----------------------------
+# 渲染端：改成读 bus 的缓存（不再阻塞）
+# -----------------------------
+def render_all_job_states(stdscr, start_y, state_payload):
+    height, width = stdscr.getmaxyx()
+    if not state_payload or "err" in state_payload:
+        msg = (state_payload or {}).get("err", "squeue error")
+        stdscr.addstr(0, start_y, msg[:max(0, width - start_y - 1)], curses.color_pair(2))
+        return start_y + 1
+
+    job_state = state_payload["states"]
+    total = state_payload["total"]
+    subset = state_payload["subset"]
+
+    states = ['R', "PD", "CD", "CA", "F"]
+    colors = [4, 5, 6, 7, 2]
+    for i in range(len(states)):
+        stdscr.addstr(0, start_y, states[i] + ' ', curses.color_pair(colors[i]))
+        stdscr.addstr(0, start_y + 1 + len(states[i]), str(job_state.get(states[i], 0)), curses.color_pair(1))
+        start_y += 4 + len(states[i])
+    stdscr.addstr(0, start_y, "S/T {}/{}".format(str(subset), str(total)), curses.color_pair(1))
+    start_y += len("S/T {}/{}".format(str(subset), str(total)))
+    return start_y + 1
+
+def render_number_of_online_user(stdscr, start_y, msg, root):
+    if not root:
+        return start_y
+    if not msg:
+        msg = "U ?/?"
+    stdscr.addstr(0, start_y, msg, curses.color_pair(1))
+    start_y += len(msg)
+    return start_y + 1
+
+def render_storage_usage(stdscr, start_x, start_y, storage_payload):
+    stdscr.addstr(start_x, start_y, 'Storage usage:', curses.color_pair(6))
+    start_y += 15
+    if not storage_payload:
+        stdscr.addstr(start_x, start_y, "loading", curses.color_pair(2))
+        return
+    for storage_path, percent in storage_payload.items():
+        stdscr.addstr(start_x, start_y, storage_path+' ', curses.color_pair(6) | curses.A_BOLD)
+        start_y += len(storage_path) + 1
+        stdscr.addstr(start_x, start_y, f"{percent:.1f}% ", curses.color_pair(1))
+        start_y += 6
+
+def render_average_load(stdscr, start_x, start_y):
+    load_avg = os.getloadavg()
+    stdscr.addstr(start_x, start_y, "Load average:", curses.color_pair(6))
+    stdscr.addstr(start_x, start_y + 13, f"{format_sysload(load_avg[0])}", curses.color_pair(1) | curses.A_BOLD)
+    stdscr.addstr(start_x, start_y + 18, f"{format_sysload(load_avg[1])} {format_sysload(load_avg[2])}", curses.color_pair(6))
+
+def render_web_speed(stdscr, start_x, start_y, speed_payload, interface_name):
+    if not speed_payload:
+        return
+    for iface in interface_name:
+        speed = speed_payload.get(iface, "0.00 KB/s⬆ 0.00 KB/s⬇")
+        stdscr.addstr(start_x, start_y, iface + ':', curses.color_pair(4) | curses.A_BOLD)
+        start_y += len(iface) + 1
+        stdscr.addstr(start_x, start_y, speed+'  ', curses.color_pair(1))
+        start_y += len(speed) + 2
 
 def print_keyborad_info(stdscr, start_x, start_y=0):
     height, width = stdscr.getmaxyx()
-    stdscr.addstr(start_x, start_y+0, "F10", curses.color_pair(1))
-    stdscr.addstr(start_x, start_y+3, "Quit", curses.color_pair(10))
-    
-    if ROOT:
-        stdscr.addstr(start_x, start_y+7, "F12", curses.color_pair(1))
-        stdscr.addstr(start_x, start_y+10, "Debug", curses.color_pair(10))
-        return start_y+15
-    return start_y+7
+    stdscr.addstr(start_x, start_y + 0, "F10", curses.color_pair(1))
+    stdscr.addstr(start_x, start_y + 3, "Quit", curses.color_pair(10))
+    if os.geteuid() == 0:
+        stdscr.addstr(start_x, start_y + 7, "F12", curses.color_pair(1))
+        stdscr.addstr(start_x, start_y + 10, "Debug", curses.color_pair(10))
+        return start_y + 15
+    return start_y + 7
 
-
-def print_last_log(stdscr, start_x, start_y):
-    if ROOT and len(LOGS) > 0:
+def print_last_log(stdscr, start_x, start_y, logs):
+    root = (os.geteuid() == 0)
+    if root and logs:
         height, width = stdscr.getmaxyx()
         version = f"By Lucky, {VERSION}"
-        log_length = min(len(LOGS), width-start_y-len(version)-4)
-        stdscr.addstr(start_x, start_y+1, ' >>'+LOGS[:log_length], curses.color_pair(1))
-
+        log_length = min(len(logs), width - start_y - len(version) - 4)
+        stdscr.addstr(start_x, start_y + 1, ' >>' + logs[:log_length], curses.color_pair(1))
 
 def print_version_info(stdscr, start_x):
     height, width = stdscr.getmaxyx()
     version = f"By Lucky, {VERSION}"
-    stdscr.addstr(start_x, width-1-len(version), version, curses.color_pair(1))
+    stdscr.addstr(start_x, width - 1 - len(version), version, curses.color_pair(1))
 
+def render_running_job_on_each_node(stdscr, savai_result, start_y, jobs_by_node):
+    """
+    复刻你原来的渲染风格：state + jobid(按 priority 上色、多节点任务统一色)。
+    """
+    height, width = stdscr.getmaxyx()
+    start_x = 1
+    nodelist = [res['nodename'] for res in savai_result]
+    multi_node_job_color_map = {}
+    multi_node_job_counter = 0
+    multi_node_job_color_list = (3, 6, 7)
 
+    for idx, node in enumerate(nodelist):
+        if start_x + idx >= height:
+            break
+
+        start_y_origin = start_y
+        state = savai_result[idx]['state']
+        if 'DOWN' in state or 'FAIL' in state:
+            color = 13
+        elif 'RESUME' in state or 'UNDRAIN' in state or 'COMPLETING' in state:
+            color = 10
+        elif 'DRAIN' in state or 'NOT_RESPONDING' in state:
+            color = 2
+        elif 'FUTURE' in state or 'CANCEL_REBOOT' in state:
+            color = 5
+        elif 'IDLE' in state:
+            color = 4
+        elif 'ALLOCATED' in state or 'MIXED' in state:
+            color = 7
+        else:
+            color = 1
+
+        if color != 7:
+            stdscr.addstr(start_x + idx, start_y, "*{}*".format(state), curses.color_pair(color))
+            start_y += len(state) + 3
+
+        jobs = (jobs_by_node or {}).get(node, [])
+        if jobs:
+            extra_y = 0
+            for jobid, prio_s, nodelist_s in jobs:
+                try:
+                    priority = int(prio_s)
+                except Exception:
+                    priority = 0
+                if priority <= 1000:
+                    c = 1
+                elif priority <= 1500:
+                    c = 5
+                elif priority <= 2000:
+                    c = 8
+                else:
+                    c = 11
+
+                if '[' in nodelist_s:
+                    try:
+                        jid_int = int(jobid)
+                    except Exception:
+                        jid_int = jobid
+                    if jid_int not in multi_node_job_color_map:
+                        multi_node_job_color_map[jid_int] = multi_node_job_color_list[multi_node_job_counter]
+                        multi_node_job_counter = (multi_node_job_counter + 1) % len(multi_node_job_color_list)
+                    c = multi_node_job_color_map[jid_int]
+
+                stdscr.addstr(start_x + idx, start_y + extra_y, jobid, curses.color_pair(c))
+                extra_y += len(jobid) + 1
+                if start_y + extra_y >= width:
+                    break
+
+        start_y = start_y_origin
+
+def render_job_table(stdscr, jt_val, old_data=None):
+    # 对齐接口
+    start_x = 0
+    width = stdscr.getmaxyx()[1]
+    align_length = jt_val['align_length']
+    title_list = jt_val['title_list']
+    data = jt_val['lines']
+
+    # 刷新逻辑
+    clear_flag = False
+    change_sort_flag = False
+    output_flags = [True] * len(data)
+    if old_data is None:
+        change_sort_flag = True
+    else:
+        old_align_length, old_data = old_data
+        if len(old_data) != len(data):
+            clear_flag = True
+        elif sum([old_align_length[i] != align_length[i] for i in range(len(align_length))]):
+            change_sort_flag = True
+        elif len(data)>20:
+            for idx in range(min(len(data), len(old_data))):
+                if old_data[idx] == data[idx]:
+                    output_flags[idx] = False
+    
+    # 清除旧数据
+    if clear_flag:
+        stdscr.erase()
+    if change_sort_flag:
+        stdscr.clear()
+        old_data = None
+        output_flags = [True] * len(data)
+    
+    # 打印任务列表
+    for idx, line in enumerate(jt_val['lines']):
+        if output_flags[idx]:
+            stdscr.addstr(start_x+idx+1, 0, line, curses.color_pair(1 if not DEBUG_MODE else random.randint(1,7)))
+
+    # 打印标题
+    stdscr.addstr(start_x, 0, jt_val['header'], curses.color_pair(9))
+    # 整理排序快捷键
+    sort_key = [("J",0),("A",1),("E",3),("U",0),("S",0),
+                ("T",0),("L",5),("C",0),("M",0),("G",0),
+                ("Q",0),("P",0),("N",0)]
+    y = 0
+    for idx, (char, i) in enumerate(sort_key[:-1]):
+        y += align_length[idx] - len(title_list[idx]) + i
+        if y >= width:
+            break
+        stdscr.addstr(start_x, y, char, curses.color_pair(9)|curses.A_UNDERLINE)
+        y += len(title_list[idx]) - i
+        y += 1
+    else:
+        char, i = sort_key[-1]
+        if y+i < width:
+            stdscr.addstr(start_x, y+i, char, curses.color_pair(9)|curses.A_UNDERLINE)
+    # 突出当前排序
+    for idx, char in enumerate(sort_key[:-1]):
+        char = char[0].lower()
+        if char == jt_val['sort'].lower()[-1]:
+            stdscr.addstr(start_x, sum(align_length[:idx+1])+idx-len(title_list[idx]), title_list[idx], curses.color_pair(12))
+            stdscr.addstr(start_x, sum(align_length[:idx+1])+idx-len(title_list[idx])+sort_key[idx][1], sort_key[idx][0], curses.color_pair(12)|curses.A_UNDERLINE)
+            break
+    else:
+        # 如果没有break，会到这里
+        stdscr.addstr(start_x, sum(align_length[:-1])+idx+1, title_list[-1], curses.color_pair(12))
+        stdscr.addstr(start_x, sum(align_length[:-1])+idx+1+sort_key[-1][1], sort_key[-1][0], curses.color_pair(12)|curses.A_UNDERLINE)
+
+    # 返回old_data
+    return align_length, data
+
+# -----------------------------
+# 主界面：gridview（渲染线程） + collectors（采集线程）
+# -----------------------------
 def gridview(stdscr):
     global DEBUG_MODE
-    global ROOT
-    global UPDATE_TIME_NUMBER_OF_ONLINE_USER
-    global LOGS
+
+    # 建议：Linux 下 fork 更快；若你在 macOS/Windows，可换成 spawn
+    try:
+        mp.set_start_method("fork", force=True)
+    except Exception:
+        # start method 可能已设置
+        pass
 
     NODES, nodename_list = get_node_number()
     DEBUG_MODE = False
     ROOT = os.geteuid() == 0
-    UPDATE_TIME_NUMBER_OF_ONLINE_USER = 0
-    LOGS = ''
-
-    # 取消屏幕回显
-    curses.noecho()
-    # 开启非阻塞输入
-    stdscr.nodelay(1)
-    # 隐藏光标
-    curses.curs_set(0)
-
-    # 设置颜色对比
-    curses.start_color()
-    curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)  # 白字黑底
-    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # 红字黑底
-    curses.init_pair(3, curses.COLOR_BLUE, curses.COLOR_BLACK)   # 蓝字黑底
-    curses.init_pair(4, curses.COLOR_GREEN, curses.COLOR_BLACK)  # 绿字黑底
-    curses.init_pair(5, curses.COLOR_YELLOW, curses.COLOR_BLACK) # 黄字黑底
-    curses.init_pair(6, curses.COLOR_CYAN, curses.COLOR_BLACK)   # 青字黑底
-    curses.init_pair(7, curses.COLOR_MAGENTA, curses.COLOR_BLACK)# 品红黑底
-
-    curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_GREEN)  # 白字绿底
-    curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_CYAN)   # 黑字青底
-    curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE) # 黑字白底
-    curses.init_pair(11, curses.COLOR_WHITE, curses.COLOR_CYAN)  # 白字青底
-    curses.init_pair(12, curses.COLOR_BLACK, curses.COLOR_GREEN) # 黑字绿底
-    curses.init_pair(13, curses.COLOR_WHITE, curses.COLOR_RED)   # 白字红底
-
-    # 设置整个窗口的背景颜色为白色
-    # stdscr.bkgd(' ', curses.color_pair(1))
-    job_sort_key = "j"
-    last_update_time = 0
-    old_data = None
-    old_height, old_width = 0, 0
-    clear_win1 = False
-    clear_win2 = False
-    clear_win3 = False
-    change_sort_flag = False
-    prev_interface_data = None, 0
     interface_name = ["ens8f0", "ibs14"]
 
-    while True:
-        # 获取屏幕大小
-        height, width = stdscr.getmaxyx()
-        if old_height != height or old_width != width:
-            old_height = height
-            old_width = width
-            # 0-NODES: 显示时间和节点信息，NODES+1空，[NODES+2, heigh-2]显示任务信息， height-1显示提示信息
-            stdscr.clear()
-            win1 = curses.newwin(NODES+1, width, 0, 0)
-            win2 = curses.newwin(height-NODES-3, width, NODES+2, 0)
-            win2.immedok(True)
-            win3 = curses.newwin(1, width, height-1, 0)
-            stdscr.refresh() # 确保窗口正确初始化
-            last_update_time = 0 # 立即更新
-            clear_win1 = True
-            clear_win2 = True
-            clear_win3 = True
-        
-        if time.time() - last_update_time >= 1:
-            # 每过1秒刷新一次
-            last_update_time = time.time()
-            clear_win3 = True
+    stop_event = threading.Event()
+    bus = DataBus()
+    manager = CollectorManager(bus, stop_event)
 
-            # win1总是每秒清空一次
-            win1.erase()
-            # 时间
-            print_time(win1)
-            # 各节点资源占用情况
-            print_node_name(win1, nodename_list)
-            result = get_savai()
-            if type(result) is not list:
-                print_node_resource_err(win1, result, start_y = 3)
-            else:
-                start_y = 3
-                start_y = print_node_resource_cpu(win1, result, start_y, True)
-                start_y = print_node_resource_mem(win1, result, start_y, True)
-                start_y = print_node_resource_gpu(win1, result, start_y, True)
-                print_running_job_on_each_node(win1, result, start_y)
-                # 任务状态总览
-                start_y = print_all_job_states(win1, start_y = 22)
-                # 在线会话数量
-                print_number_of_online_user(win1, start_y=start_y)
-                win1.noutrefresh()
+    # 共享的“动态参数”（sort_key / max_line / width）给 job_table collector 用
+    param_lock = threading.Lock()
+    params = {
+        "sort_key": "j",
+        "max_line": 50,
+        "width": 120,
+        "nodelist": [res for res in nodename_list],
+        "interface_name": interface_name,
+    }
 
-                # win2只在数据迭代时清空
-                if clear_win2:
-                    clear_win2 = False
-                    old_data = None
-                # 任务监控指标
+    # 采集函数包装成“可 picklable 的顶层 callable”：用闭包会在 spawn 下出问题，所以这里用小类
+    class JobTableFn:
+        def __call__(self):
+            with param_lock:
+                sk = params["sort_key"]
+                ml = params["max_line"]
+                w = params["width"]
+            return collect_job_table(sk, ml, w)
+
+    net_fn = make_net_speed_collector(interface_name)
+
+    class RunningJobsFn:
+        def __call__(self):
+            with param_lock:
+                nl = list(params["nodelist"])
+            return collect_running_jobs_on_nodes(nl)
+
+    # 注册采集器（默认 1 秒）
+    manager.add("savai", collect_savai, interval_s=3.0, timeout_s=5.0)
+    manager.add("job_states", collect_all_job_states, interval_s=1.0, timeout_s=5.0)
+    manager.add("online_users", collect_online_user_msg, interval_s=10.0, timeout_s=5.0)
+    manager.add("storage", collect_storage_usage, interval_s=60.0, timeout_s=5.0)     # NFS 慢：给更短 timeout
+    manager.add("job_table", JobTableFn(), interval_s=1.0, timeout_s=2.0)
+    manager.add_thread_only("net_speed", net_fn, interval_s=1.0)
+    manager.add("running_jobs", RunningJobsFn(), interval_s=1.0, timeout_s=3.0)      # 每节点 squeue：可能慢
+    manager.add("kill_overload", collect_kill_overload_and_log, interval_s=3.0, timeout_s=5.0)
+
+    manager.start_all()
+    # import pdb; pdb.set_trace()
+
+    # curses init
+    curses.noecho()
+    stdscr.nodelay(1)
+    curses.curs_set(0)
+
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
+    curses.init_pair(3, curses.COLOR_BLUE, curses.COLOR_BLACK)
+    curses.init_pair(4, curses.COLOR_GREEN, curses.COLOR_BLACK)
+    curses.init_pair(5, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    curses.init_pair(6, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    curses.init_pair(7, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+
+    curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_GREEN)
+    curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_CYAN)
+    curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(11, curses.COLOR_WHITE, curses.COLOR_CYAN)
+    curses.init_pair(12, curses.COLOR_BLACK, curses.COLOR_GREEN)
+    curses.init_pair(13, curses.COLOR_WHITE, curses.COLOR_RED)
+
+    job_sort_key = "j"
+    last_update_time = 0
+    old_height, old_width = 0, 0
+    change_sort_flag = False
+    clear_win2 = False
+    old_data = None
+
+    try:
+        while not stop_event.is_set():
+            height, width = stdscr.getmaxyx()
+            if old_height != height or old_width != width:
+                old_height = height
+                old_width = width
+                stdscr.clear()
+                win1 = curses.newwin(NODES + 1, width, 0, 0)
+                win2 = curses.newwin(height - NODES - 3, width, NODES + 2, 0)
+                win2.immedok(True)
+                win3 = curses.newwin(1, width, height - 1, 0)
+                stdscr.refresh()
+                last_update_time = 0
+                clear_win2 = True
+
+            # 每秒刷新一次（保持你原来的节奏）
+            if time.time() - last_update_time >= 1:
+                last_update_time = time.time()
+
+                # 更新动态参数给 collector
+                # max_line 依赖 savai 的长度：用缓存结果来估计（没有就用 NODES）
+                savai_s = bus.get("savai")
+                savai_val = savai_s.value if (savai_s) else None
+                if isinstance(savai_val, list):
+                    n_rows = len(savai_val)
+                else:
+                    n_rows = NODES
+                max_line = height - 1 - n_rows - 4 - 1
+
+                with param_lock:
+                    params["sort_key"] = job_sort_key
+                    params["max_line"] = max(0, max_line)
+                    params["width"] = width
+                    params["nodelist"] = list(nodename_list)
+                    params["interface_name"] = list(interface_name)
+
+                # --- win1 ---
+                win1.erase()
+                print_time(win1)
+                print_node_name(win1, nodename_list)
+
+                if isinstance(savai_val, list):
+                    start_y = 3
+                    start_y = print_node_resource_cpu(win1, savai_val, start_y, True)
+                    start_y = print_node_resource_mem(win1, savai_val, start_y, True)
+                    start_y = print_node_resource_gpu(win1, savai_val, start_y, True)
+
+                    # 每节点 job：读缓存（后台采集）
+                    rj = bus.get("running_jobs")
+                    jobs_by_node = rj.value if (rj and rj.ok) else {}
+                    render_running_job_on_each_node(win1, savai_val, start_y, jobs_by_node)
+
+                    # 任务状态总览：读缓存
+                    js = bus.get("job_states")
+                    job_states_payload = js.value if (js and js.ok) else ({"err": js.err} if js else None)
+                    start_y2 = render_all_job_states(win1, start_y=22, state_payload=job_states_payload)
+
+                    # 在线会话数量：读缓存
+                    ou = bus.get("online_users")
+                    msg = ou.value if (ou and ou.ok) else ""
+                    render_number_of_online_user(win1, start_y=start_y2, msg=msg, root=ROOT)
+                    win1.noutrefresh()
+                else:
+                    # savai 出错
+                    err_msg = savai_s.err if savai_s else "loading..."
+                    print_node_resource_err(win1, err_msg, start_y=3)
+                    win1.noutrefresh()
+
+                # --- win2 ---
                 try:
-                    old_data = print_job_data(
-                        win2, 
-                        old_data,
-                        start_x=0,
-                        sort=job_sort_key, 
-                        max_line=height-1-len(result)-4-1,
-                        change_sort_flag=change_sort_flag,
-                    )
-                    # 打印存储
-                    print_storage_usage(win2, start_x=win2.getmaxyx()[0]-2, start_y=0)
-                    # 打印系统负载
-                    print_average_load(win2, start_x=win2.getmaxyx()[0]-1, start_y=0)
-                    # 打印网速
-                    prev_interface_data = print_web_speed(
-                        win2, 
-                        start_x=win2.getmaxyx()[0]-1, 
-                        start_y=1+27, 
-                        prev_data=prev_interface_data[0], 
-                        interface_name=interface_name, 
-                        interval=last_update_time-prev_interface_data[1]
-                    ), last_update_time
+                    if clear_win2:
+                        win2.erase()
+                        clear_win2 = False
+                        old_data = None
 
+                    # job table：读缓存直接打印（保持你原先表格输出）
+                    jt = bus.get("job_table")
+                    jt_val = jt.value if (jt and jt.ok) else None
+                    if jt_val and "err" not in jt_val:
+                        old_data = render_job_table(win2, jt_val, old_data)
+                    else:
+                        err = (jt_val or {}).get("err") if jt_val else (jt.err if jt else "loading...")
+                        win2.addstr(1, 0, str(err)[:max(0, width - 1)], curses.color_pair(2))
+
+                    # 存储：读缓存
+                    st = bus.get("storage")
+                    storage_payload = st.value if (st and st.ok) else None
+                    render_storage_usage(win2, start_x=win2.getmaxyx()[0] - 2, start_y=0, storage_payload=storage_payload)
+
+                    # 系统负载：快速，直接算（不阻塞）
+                    render_average_load(win2, start_x=win2.getmaxyx()[0] - 1, start_y=0)
+
+                    # 网速：读缓存
+                    ns = bus.get("net_speed")
+                    speed_payload = ns.value if (ns and ns.ok) else None
+                    render_web_speed(win2, start_x=win2.getmaxyx()[0] - 1, start_y=1 + 27, speed_payload=speed_payload, interface_name=interface_name)
+
+                    win2.noutrefresh()
                 except curses.error:
                     clear_win2 = True
-                change_sort_flag = False
-                # win2.refresh()
 
-            # win3一般不用更新，由用户输入控制
-            if clear_win3:
+                # --- win3 ---
                 win3.erase()
-                clear_win3 = False
-                # 打印键盘快捷键信息
                 start_y = print_keyborad_info(win3, start_x=0)
-                # 打印上一条日志
-                print_last_log(win3, start_x=0, start_y=start_y)
-                # 打印版本号
+                kl = bus.get("kill_overload")
+                logs = kl.value if (kl and kl.ok and kl.value) else ""
+                print_last_log(win3, start_x=0, start_y=start_y, logs=logs)
                 print_version_info(win3, start_x=0)
                 win3.noutrefresh()
-            
-            # 更新屏幕
-            curses.doupdate()
 
-        # 检查用户输入，按 'F10' 退出
-        try:
-            key = stdscr.getch()
-            if key == curses.KEY_F10:
-                break
-            elif key == curses.KEY_F12:
-                DEBUG_MODE = not DEBUG_MODE
-            elif ord('a')<=key<=ord('z') or ord('A')<=key<=ord('Z'):
-                char = chr(key).lower()
-                if job_sort_key.lower() == char:
-                    job_sort_key = '-'+job_sort_key
-                elif char in 'jaeustlcmgqpn':
-                    job_sort_key = char
-                last_update_time = 0
-                change_sort_flag = True
-            elif key == curses.KEY_UP:
-                last_update_time = 0
-        except Exception:
-            # 无输入时继续
-            pass
+                curses.doupdate()
 
-        time.sleep(0.1)
+            # 按键处理（保持你原来逻辑）
+            try:
+                key = stdscr.getch()
+                if key == curses.KEY_F10:
+                    stop_event.set()
+                    break
+                elif key == curses.KEY_F12:
+                    DEBUG_MODE = not DEBUG_MODE
+                elif ord('a') <= key <= ord('z') or ord('A') <= key <= ord('Z'):
+                    char = chr(key).lower()
+                    if job_sort_key.lower() == char:
+                        job_sort_key = '-' + job_sort_key
+                    elif char in 'jaeustlcmgqpn':
+                        job_sort_key = char
+                    last_update_time = 0
+                    clear_win2 = True
+                    change_sort_flag = True
+                elif key == curses.KEY_UP:
+                    last_update_time = 0
+            except Exception:
+                pass
+
+            time.sleep(0.1)
+
+    except KeyboardInterrupt:
+        stop_event.set()
+    finally:
+        manager.stop_all()
+        time.sleep(0.05)
 
 height, width = 100, 80
 if __name__ == "__main__":
-    # 设置区域以支持 UTF-8
+    # gridview(None)
     locale.setlocale(locale.LC_ALL, '')
-    # 启动
     try:
         curses.wrapper(gridview)
     except KeyboardInterrupt:
