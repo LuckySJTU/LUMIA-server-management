@@ -11,6 +11,7 @@ import random
 import os
 import sys
 import pwd
+import shutil
 
 try:
     import psutil
@@ -551,7 +552,7 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
         if clear_flag:
             stdscr.erase()
         if change_sort_flag:
-            stdscr.clear() 
+            stdscr.clear()
             old_data = None
             output_flags = [True] * len(data)
         # 打印内容
@@ -597,6 +598,21 @@ def print_job_data(stdscr, old_data, start_x, sort='j', max_line=999, change_sor
     else:
         stdscr.addstr(start_x+1, 0, stderr.decode('utf-8'), curses.color_pair(2))
         return None
+
+
+# storage load
+def print_storage_usage(stdscr, start_x, start_y=0):
+    storage_paths = ['/home', '/data0', '/data1', '/data2', '/data3']
+    stdscr.addstr(start_x, start_y, 'Storage usage:', curses.color_pair(6))
+    start_y += 15
+    for storage_path in storage_paths:
+        if os.path.exists(storage_path):
+            usage = shutil.disk_usage(storage_path)
+            percent = usage.used / usage.total * 100
+            stdscr.addstr(start_x, start_y, storage_path, curses.color_pair(6)|curses.A_BOLD)
+            start_y += len(storage_path) + 1
+            stdscr.addstr(start_x, start_y, f"{percent:.1f}%", curses.color_pair(1))
+            start_y += 6
 
 
 # interfaces monitor and system load monitor
@@ -664,8 +680,8 @@ def print_average_load(stdscr, start_x, start_y):
     stdscr.addstr(start_x, start_y, "Load average:", curses.color_pair(6))
     stdscr.addstr(start_x, start_y+13, f"{format_sysload(load_avg[0])}", curses.color_pair(1)|curses.A_BOLD)
     stdscr.addstr(start_x, start_y+18, f"{format_sysload(load_avg[1])} {format_sysload(load_avg[2])}", curses.color_pair(6))
-    # if ROOT and load_avg[0] > 30:
-    kill_over_load_job_auto()
+    if ROOT:
+        kill_over_load_job_auto()
 
 def username_of(uid):
     try:
@@ -710,7 +726,7 @@ def looks_like_vscode_task(proc):
     - 进程的 cwd/cmdline/path 中包含 '/.vscode/'
     - 命令行中包含类似 'vscode-server' / VSCode 扩展运行路径（常见于 ~/.vscode）
     """
-    patterns = ["/.vscode/", "vscode-server", "VSCode"]
+    patterns = [".vscode", "vscode-server", "VSCode", ".cursor", "cursor-server"]
     try:
         # cwd
         cwd = ""
@@ -780,8 +796,11 @@ def kill_over_load_job_auto():
     overload_job_list = get_overload_job()
     global LOGS
     for job in overload_job_list:
-        LOGS = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Kill {job[0]}, User {job[1]}, Cmd {job[-1]}"
-        os.kill(job[0],9)
+        LOGS = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]pid {job[0]}, User {job[1]}, Cmd {job[-1]}"
+        load_avg = os.getloadavg()
+        if load_avg[0] > 50:
+            os.kill(job[0],9)
+            LOGS = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Kill {job[0]}, User {job[1]}, Cmd {job[-1]}"
 
 
 def print_keyborad_info(stdscr, start_x, start_y=0):
@@ -880,6 +899,7 @@ def gridview(stdscr):
         if time.time() - last_update_time >= 1:
             # 每过1秒刷新一次
             last_update_time = time.time()
+            clear_win3 = True
 
             # win1总是每秒清空一次
             win1.erase()
@@ -913,9 +933,11 @@ def gridview(stdscr):
                         old_data,
                         start_x=0,
                         sort=job_sort_key, 
-                        max_line=height-1-len(result)-4,
+                        max_line=height-1-len(result)-4-1,
                         change_sort_flag=change_sort_flag,
                     )
+                    # 打印存储
+                    print_storage_usage(win2, start_x=win2.getmaxyx()[0]-2, start_y=0)
                     # 打印系统负载
                     print_average_load(win2, start_x=win2.getmaxyx()[0]-1, start_y=0)
                     # 打印网速
