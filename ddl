@@ -126,7 +126,7 @@ def main(args):
                 line = ['', '']
 
         if args.p:
-            print('|'.join(['CONFERENCE', 'CCF', 'DDL(TIMEZONE)', 'TIMELEFT']))
+            print('|'.join(['CONFERENCE', 'CCF', 'DDL(TIMEZONE)', 'TIMELEFT(UTC+8)']))
             for line in output_str:
                 print('|'.join(line))
         else:
@@ -137,7 +137,7 @@ def main(args):
                 11,
             ]
             formation = ("{{:<{}}} "*3 + "{{:<{}}}").format(*align_length)
-            print(printc(formation.format('CONFERENCE', 'CCF', 'DDL(TIMEZONE)', 'TIMELEFT'), fg='cyan', bold=True))
+            print(printc(formation.format('CONFERENCE', 'CCF', 'DDL(TIMEZONE)', 'TIMELEFT(UTC+8)'), fg='cyan', bold=True))
             for line in output_str:
                 print(formation.format(*line))
     else:
