@@ -1054,7 +1054,7 @@ def gridview(stdscr):
             return collect_running_jobs_on_nodes(nl)
 
     # 注册采集器（默认 1 秒）
-    manager.add("savai", collect_savai, interval_s=3.0, timeout_s=5.0)
+    manager.add("savai", collect_savai, interval_s=3.0, timeout_s=10.0)
     manager.add("job_states", collect_all_job_states, interval_s=1.0, timeout_s=5.0)
     manager.add("online_users", collect_online_user_msg, interval_s=10.0, timeout_s=5.0)
     manager.add("storage", collect_storage_usage, interval_s=60.0, timeout_s=5.0)     # NFS 慢：给更短 timeout
