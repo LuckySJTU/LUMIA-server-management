@@ -29,6 +29,8 @@ if t.TYPE_CHECKING:
     from rfl.settings import RuntimeSettings
     from ..cache import CachingService
 
+import subprocess
+
 
 class Slurmrestd:
     def __init__(
@@ -297,6 +299,60 @@ class Slurmrestd:
 
     def qos(self: str, **kwargs):
         return self._request(f"/slurmdb/v{self.api_version}/qos", "qos", **kwargs)
+
+    def myrequests(self: str, args, **kwargs):
+        user_name, data = args
+        logger.info(data)
+        data={
+            "job":{
+                "environment": [
+                    f"HOME=/home/{user_name}",
+                    f"USER={user_name}",
+                    f"LOGNAME={user_name}",
+                    "SHELL=/bin/bash",
+                    "PATH=/usr/local/bin:/usr/bin:/bin"
+                ],
+                "partition": data['partition'],
+                "qos": data['qos'],
+                "cpus_per_task": data['cpus_per_task'],
+                "memory_per_node": data["memory_per_node"],
+                "tres_per_node": f"gres/gpu:{data['gpus_per_node']}",
+                "name": data['job_name'],
+                "current_working_directory": f"/home/{user_name}",
+                "standard_output": data['standard_output'],
+                "standard_error": data['standard_error'],
+                "script": data['script']
+            }
+        }
+        try:
+            # 调用 scontrol token 命令
+            cmd = ["scontrol", "token", f"username={user_name}"]
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            
+            # scontrol token 的输出一般是 "SLURM_JWT=eyJhbGciOi..." 这样的 JWT
+            token = result.stdout.strip()[10:]
+        except subprocess.CalledProcessError as e:
+            return {"error":"Failed to get jwt token","message":e.stderr.strip()}
+
+        headers = {
+            "X-SLURM-USER-NAME": user_name,
+            "X-SLURM-USER-TOKEN": token,
+            "Content-Type": "application/json",
+        }
+        response = self.session.post(
+            f"{self.prefix}/slurm/v{self.api_version}/job/submit", headers=headers, json=data
+        )
+        return response.json()
+        # return self._request(f"/slurm/v{self.api_version}/job/submit", "jobs", 
+        #                      data={
+        #                          "job":{
+        #                              "account": "yxwang",
+        #                              "partition": "cpu",
+        #                              "qos": "normal",
+        #                              "cpus_per_task": 10,
+        #                              "mem": "16G"
+        #                          }
+        #                      }, **kwargs)
 
     @staticmethod
     def node_gres_extract_gpus(gres_full: str) -> int:
