@@ -328,6 +328,12 @@ def metrics(cluster: str, metric: str):
 
 @check_jwt
 @validate_cluster
+def myrequests(cluster: str):
+    return proxy_agent(cluster, "myrequests", request.token)
+
+
+@check_jwt
+@validate_cluster
 def racksdb(cluster: str, query: str):
     return proxy_agent(
         cluster,

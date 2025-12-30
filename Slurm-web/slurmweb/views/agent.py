@@ -196,6 +196,13 @@ def cache_stats():
         }
     )
 
+@rbac_action("myrequests")
+def myrequests():
+    # can get username by: request.user.login
+    # can get jwt token by: request.token
+    # import pdb; pdb.set_trace()
+    return jsonify(slurmrest("myrequests", (request.user.login, request.json)))
+
 
 @check_jwt
 def metrics(metric):
