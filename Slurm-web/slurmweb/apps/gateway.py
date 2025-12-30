@@ -121,6 +121,7 @@ class SlurmwebAppGateway(SlurmwebWebApp, RFLTokenizedWebApp):
             methods=["GET", "POST"],
         ),
         SlurmwebAppRoute("/api/agents/<cluster>/myrequests", views.myrequests, methods=["POST"]),
+        SlurmwebAppRoute("/api/agents/<cluster>/submit", views.submit, methods=["POST"]),
     }
 
     async def _get_agent_info(self, url) -> SlurmwebAgent:
