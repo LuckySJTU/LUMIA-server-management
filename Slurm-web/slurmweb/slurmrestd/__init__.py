@@ -302,9 +302,16 @@ class Slurmrestd:
 
     def myrequests(self: str, args, **kwargs):
         user_name, data = args
+        return self._submit_job(user_name, data)
+
+    def submit(self: str, args, **kwargs):
+        user_name, data = args
+        return self._submit_job(user_name, data)
+
+    def _submit_job(self, user_name: str, data: dict):
         logger.info(data)
-        data={
-            "job":{
+        data = {
+            "job": {
                 "environment": [
                     f"HOME=/home/{user_name}",
                     f"USER={user_name}",
@@ -321,7 +328,7 @@ class Slurmrestd:
                 "current_working_directory": f"/home/{user_name}",
                 "standard_output": data['standard_output'],
                 "standard_error": data['standard_error'],
-                "script": data['script']
+                "script": data["script"],
             }
         }
         try:

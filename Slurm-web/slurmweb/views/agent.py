@@ -203,6 +203,10 @@ def myrequests():
     # import pdb; pdb.set_trace()
     return jsonify(slurmrest("myrequests", (request.user.login, request.json)))
 
+@rbac_action("myrequests")
+def submit():
+    return jsonify(slurmrest("submit", (request.user.login, request.json)))
+
 
 @check_jwt
 def metrics(metric):
