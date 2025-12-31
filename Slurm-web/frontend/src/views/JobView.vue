@@ -181,6 +181,7 @@ const jobFieldsContent = computed(
 
 const canCancel = computed(() => {
   if (!data.value) return false
+  if (!runtimeStore.hasPermission('cancel-job')) return false
   const isOwner = authStore.username && data.value.user === authStore.username
   const states = data.value.state.current
   const isActive = states.includes('PENDING') || states.includes('RUNNING')

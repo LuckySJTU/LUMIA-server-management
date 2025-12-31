@@ -22,7 +22,7 @@ except ModuleNotFoundError:
     from werkzeug import wsgi as dispatcher
 
 from . import SlurmwebWebApp
-# from ..version import get_version
+from ..version import get_version
 from ..views import SlurmwebAppRoute
 from ..views import agent as views
 from ..slurmrestd import SlurmrestdFilteredCached
@@ -32,8 +32,8 @@ from ..errors import SlurmwebConfigurationError
 
 logger = logging.getLogger(__name__)
 
-def get_version():
-    return '5.0.0'
+# def get_version():
+#     return '5.0.0'
 
 class SlurmwebAppAgent(SlurmwebWebApp, RFLTokenizedRBACWebApp):
     NAME = "slurm-web-agent"

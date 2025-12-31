@@ -271,6 +271,7 @@ onMounted(() => {
 
             <div class="flex items-center gap-3">
               <button
+                v-if="runtimeStore.hasPermission('submit-job')"
                 type="button"
                 class="bg-slate-700 hover:bg-slate-800 focus-visible:outline-slate-700 inline-flex items-center gap-x-1.5 rounded-md px-3 py-2 text-sm font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 dark:bg-slate-600 dark:hover:bg-slate-500"
                 @click="goToSubmitJob"

@@ -13,6 +13,7 @@ import ClusterMainLayout from '@/components/ClusterMainLayout.vue'
 import { useGatewayAPI } from '@/composables/GatewayAPI'
 import type { SubmitJobRequest } from '@/composables/GatewayAPI'
 import { useAuthStore } from '@/stores/auth'
+import { useRuntimeStore } from '@/stores/runtime'
 import { ChevronLeftIcon } from '@heroicons/vue/20/solid'
 
 const { cluster } = defineProps<{ cluster: string }>()
@@ -20,6 +21,7 @@ const { cluster } = defineProps<{ cluster: string }>()
 const router = useRouter()
 const gatewayAPI = useGatewayAPI()
 const authStore = useAuthStore()
+const runtimeStore = useRuntimeStore()
 const submitting = ref(false)
 const errorMessage = ref('')
 const gpuTouched = ref(false)
@@ -274,6 +276,7 @@ function backToJobs() {
     </section>
 
     <button
+      v-if="runtimeStore.hasPermission('submit-job')"
       type="button"
       class="fixed bottom-6 right-6 z-50 inline-flex items-center gap-2 rounded-full bg-slurmweb px-6 py-3 text-sm font-semibold text-white shadow-lg transition hover:bg-slurmweb-darker focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slurmweb disabled:cursor-not-allowed disabled:opacity-60"
       :disabled="submitting"
