@@ -196,6 +196,61 @@ def cache_stats():
         }
     )
 
+@rbac_action("myrequests")
+def myrequests():
+    # can get username by: request.user.login
+    # can get jwt token by: request.token
+    # import pdb; pdb.set_trace()
+    return jsonify(slurmrest("myrequests", (request.user.login, request.json)))
+
+@rbac_action("submit-job")
+def submit():
+    if not request.is_json:
+        abort(400, "Request body must be JSON")
+    data = request.json
+    if not isinstance(data, dict):
+        abort(400, "Request body must be a JSON object")
+
+    required_fields = [
+        "partition",
+        "qos",
+        "cpus_per_task",
+        "memory_per_node",
+        "job_name",
+        "standard_output",
+        "standard_error",
+        "script",
+    ]
+    missing = [field for field in required_fields if field not in data]
+    if missing:
+        abort(400, f"Missing required fields: {', '.join(missing)}")
+
+    string_fields = [
+        "partition",
+        "qos",
+        "job_name",
+        "standard_output",
+        "standard_error",
+        "script",
+    ]
+    for field in string_fields:
+        if not isinstance(data.get(field), str) or not data[field].strip():
+            abort(400, f"Invalid or empty field: {field}")
+
+    int_fields = ["cpus_per_task", "memory_per_node"]
+    for field in int_fields:
+        value = data.get(field)
+        if not isinstance(value, int) or value <= 0:
+            abort(400, f"Invalid field: {field}")
+
+    gpus = data.get("gpus_per_node", 0)
+    if not isinstance(gpus, int) or gpus < 0:
+        abort(400, "Invalid field: gpus_per_node")
+    data["gpus_per_node"] = gpus
+
+    result = slurmrest("submit", (request.user.login, data))
+    return jsonify(result)
+
 
 @check_jwt
 def metrics(metric):

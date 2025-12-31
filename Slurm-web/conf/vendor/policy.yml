@@ -19,3 +19,5 @@ actions:
     defined reservations.
   cache-view: |
     Access to cache information and metrics in settings panel.
+  submit-job: |
+    Submit a job to the cluster.

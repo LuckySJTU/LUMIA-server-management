@@ -29,6 +29,8 @@ if t.TYPE_CHECKING:
     from rfl.settings import RuntimeSettings
     from ..cache import CachingService
 
+import subprocess
+
 
 class Slurmrestd:
     def __init__(
@@ -297,6 +299,136 @@ class Slurmrestd:
 
     def qos(self: str, **kwargs):
         return self._request(f"/slurmdb/v{self.api_version}/qos", "qos", **kwargs)
+
+    def myrequests(self: str, args, **kwargs):
+        user_name, data = args
+        return self._submit_job(user_name, data)
+
+    def submit(self: str, args, **kwargs):
+        user_name, data = args
+        return self._submit_job(user_name, data)
+
+    def _submit_job(self, user_name: str, data: dict):
+        gpus_per_node = data.get("gpus_per_node", 0)
+        logger.info(
+            "Submitting job for user %s: name=%s partition=%s qos=%s cpus_per_task=%s "
+            "memory_per_node=%s gpus_per_node=%s",
+            user_name,
+            data.get("job_name"),
+            data.get("partition"),
+            data.get("qos"),
+            data.get("cpus_per_task"),
+            data.get("memory_per_node"),
+            gpus_per_node,
+        )
+        job = {
+            "environment": [
+                f"HOME=/home/{user_name}",
+                f"USER={user_name}",
+                f"LOGNAME={user_name}",
+                "SHELL=/bin/bash",
+                "PATH=/usr/local/bin:/usr/bin:/bin",
+            ],
+            "partition": data["partition"],
+            "qos": data["qos"],
+            "cpus_per_task": data["cpus_per_task"],
+            "memory_per_node": data["memory_per_node"],
+            "name": data["job_name"],
+            "current_working_directory": f"/home/{user_name}",
+            "standard_output": data["standard_output"],
+            "standard_error": data["standard_error"],
+            "script": data["script"],
+        }
+        if gpus_per_node:
+            job["tres_per_node"] = f"gres/gpu:{gpus_per_node}"
+        data = {"job": job}
+        try:
+            # 调用 scontrol token 命令
+            cmd = ["scontrol", "token", f"username={user_name}"]
+            result = subprocess.run(
+                cmd, check=True, capture_output=True, text=True, timeout=5
+            )
+
+            # scontrol token 的输出一般是 "SLURM_JWT=eyJhbGciOi..." 这样的 JWT
+            output = result.stdout.strip()
+            if not output.startswith("SLURM_JWT="):
+                raise SlurmrestdInternalError(
+                    "scontrol token invalid",
+                    -1,
+                    f"Unexpected scontrol output: {output}",
+                    "slurmweb",
+                )
+            token = output[len("SLURM_JWT=") :].strip()
+            if not token:
+                raise SlurmrestdInternalError(
+                    "scontrol token invalid",
+                    -1,
+                    "Empty JWT token returned by scontrol",
+                    "slurmweb",
+                )
+        except FileNotFoundError as err:
+            raise SlurmrestdInternalError(
+                "scontrol not found",
+                -1,
+                f"scontrol command not found: {err}",
+                "slurmweb",
+            )
+        except subprocess.TimeoutExpired as err:
+            raise SlurmrestdInternalError(
+                "scontrol timeout",
+                -1,
+                f"scontrol token timed out after {err.timeout}s",
+                "slurmweb",
+            )
+        except subprocess.CalledProcessError as err:
+            stderr = err.stderr.strip() if err.stderr else ""
+            stdout = err.stdout.strip() if err.stdout else ""
+            detail = stderr or stdout or "scontrol token failed"
+            raise SlurmrestdInternalError(
+                "scontrol token failed", err.returncode, detail, "slurmweb"
+            )
+
+        headers = {
+            "X-SLURM-USER-NAME": user_name,
+            "X-SLURM-USER-TOKEN": token,
+            "Content-Type": "application/json",
+        }
+        try:
+            response = self.session.post(
+                f"{self.prefix}/slurm/v{self.api_version}/job/submit",
+                headers=headers,
+                json=data,
+            )
+        except requests.exceptions.ConnectionError as err:
+            raise SlurmrestConnectionError(str(err))
+
+        self._validate_response(response, False)
+        result = response.json()
+        if len(result.get("errors", [])):
+            error = result["errors"][0]
+            raise SlurmrestdInternalError(
+                error.get("error", "slurmrestd undefined error"),
+                error.get("error_number", -1),
+                error.get("description", "slurmrestd job submit error"),
+                error.get("source", "slurmrestd"),
+            )
+        if "warnings" in result and len(result["warnings"]):
+            logger.warning(
+                "slurmrestd query %s warnings: %s",
+                f"/slurm/v{self.api_version}/job/submit",
+                result["warnings"],
+            )
+        return result
+        # return self._request(f"/slurm/v{self.api_version}/job/submit", "jobs", 
+        #                      data={
+        #                          "job":{
+        #                              "account": "yxwang",
+        #                              "partition": "cpu",
+        #                              "qos": "normal",
+        #                              "cpus_per_task": 10,
+        #                              "mem": "16G"
+        #                          }
+        #                      }, **kwargs)
 
     @staticmethod
     def node_gres_extract_gpus(gres_full: str) -> int:

@@ -120,6 +120,8 @@ class SlurmwebAppGateway(SlurmwebWebApp, RFLTokenizedWebApp):
             views.racksdb,
             methods=["GET", "POST"],
         ),
+        SlurmwebAppRoute("/api/agents/<cluster>/myrequests", views.myrequests, methods=["POST"]),
+        SlurmwebAppRoute("/api/agents/<cluster>/submit", views.submit, methods=["POST"]),
     }
 
     async def _get_agent_info(self, url) -> SlurmwebAgent:
@@ -215,8 +217,8 @@ class SlurmwebAppGateway(SlurmwebWebApp, RFLTokenizedWebApp):
         if self.settings.authentication.enabled:
             if self.settings.authentication.method == "ldap":
                 bind_password = (
-                    load_ldap_password_from_file(self.settings.ldap.bind_password_file)
-                    or self.settings.ldap.bind_password
+                    # load_ldap_password_from_file(self.settings.ldap.bind_password_file)
+                    self.settings.ldap.bind_password
                 )
                 self.authentifier = LDAPAuthentifier(
                     uri=self.settings.ldap.uri,
@@ -234,7 +236,7 @@ class SlurmwebAppGateway(SlurmwebWebApp, RFLTokenizedWebApp):
                     bind_password=bind_password,
                     restricted_groups=self.settings.ldap.restricted_groups,
                     lookup_user_dn=self.settings.ldap.lookup_user_dn,
-                    lookup_as_user=self.settings.ldap.lookup_as_user,
+                    # lookup_as_user=self.settings.ldap.lookup_as_user,
                 )
             else:
                 raise SlurmwebConfigurationError(
