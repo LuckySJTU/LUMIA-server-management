@@ -104,7 +104,7 @@ async function submitJob() {
     partition: form.partition.trim(),
     gpus_per_node: form.gpus_per_node,
     cpus_per_task: form.cpus_per_task,
-    memory_per_node: form.memory_per_node,
+    memory_per_node: form.memory_per_node * 1024,
     script: normalizeScript(form.script),
     standard_output: form.standard_output.trim() || '%j.out',
     standard_error: form.standard_error.trim() || '%j.err'
@@ -190,7 +190,7 @@ function backToJobs() {
             <option value="RTX4090">RTX4090</option>
             <option value="ADA6000">ADA6000</option>
             <option value="L40S">L40S</option>
-            <option value="CPU">cpu</option>
+            <option value="cpu">CPU</option>
           </select>
         </div>
 
