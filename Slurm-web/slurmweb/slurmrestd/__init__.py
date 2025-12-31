@@ -114,6 +114,37 @@ class Slurmrestd:
             )
         return result[key]
 
+    def _delete_request(self, query, ignore_notfound=False):
+        try:
+            response = self.session.delete(
+                f"{self.prefix}{query}", headers=self.auth.headers()
+            )
+        except requests.exceptions.ConnectionError as err:
+            raise SlurmrestConnectionError(str(err))
+
+        self._validate_response(response, ignore_notfound)
+
+        result = response.json()
+        if len(result["errors"]):
+            error = result["errors"][0]
+            raise SlurmrestdInternalError(
+                error.get("error", "slurmrestd undefined error"),
+                error.get("error_number", -1),
+                error["description"],
+                error["source"],
+            )
+        if "warnings" not in result:
+            logger.error(
+                "Unable to extract warnings from slurmrestd response to %s, "
+                "unsupported Slurm version?",
+                query,
+            )
+        elif len(result["warnings"]):
+            logger.warning(
+                "slurmrestd query %s warnings: %s", query, result["warnings"]
+            )
+        return result
+
     def version(self, **kwargs):
         return self._request(f"/slurm/v{self.api_version}/ping", "meta", **kwargs)[
             "slurm"
@@ -299,6 +330,50 @@ class Slurmrestd:
 
     def qos(self: str, **kwargs):
         return self._request(f"/slurmdb/v{self.api_version}/qos", "qos", **kwargs)
+
+    def cancel(self: str, args, **kwargs):
+        user_name, job_id = args
+        try:
+            cmd = ["scontrol", "token", f"username={user_name}"]
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            token = result.stdout.strip()[10:]
+        except subprocess.CalledProcessError as e:
+            return {"error": "Failed to get jwt token", "message": e.stderr.strip()}
+
+        headers = {
+            "X-SLURM-USER-NAME": user_name,
+            "X-SLURM-USER-TOKEN": token,
+            "Content-Type": "application/json",
+        }
+        try:
+            response = self.session.delete(
+                f"{self.prefix}/slurm/v{self.api_version}/job/{job_id}",
+                headers=headers,
+            )
+        except requests.exceptions.ConnectionError as err:
+            raise SlurmrestConnectionError(str(err))
+
+        self._validate_response(response, False)
+        result = response.json()
+        if len(result["errors"]):
+            error = result["errors"][0]
+            raise SlurmrestdInternalError(
+                error.get("error", "slurmrestd undefined error"),
+                error.get("error_number", -1),
+                error["description"],
+                error["source"],
+            )
+        if "warnings" not in result:
+            logger.error(
+                "Unable to extract warnings from slurmrestd response to %s, "
+                "unsupported Slurm version?",
+                response.url,
+            )
+        elif len(result["warnings"]):
+            logger.warning(
+                "slurmrestd query %s warnings: %s", response.url, result["warnings"]
+            )
+        return result
 
     def myrequests(self: str, args, **kwargs):
         user_name, data = args

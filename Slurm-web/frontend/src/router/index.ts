@@ -26,6 +26,7 @@ import ResourcesView from '@/views/ResourcesView.vue'
 import NodeView from '@/views/NodeView.vue'
 import QosView from '@/views/QosView.vue'
 import ReservationsView from '@/views/ReservationsView.vue'
+import SubmitJobView from '@/views/SubmitJobView.vue'
 import JobsStatusBadges from '@/views/tests/JobsStatusBadges.vue'
 import NodesStatusBadges from '@/views/tests/NodesStatusBadges.vue'
 
@@ -109,6 +110,12 @@ const router = createRouter({
           path: 'jobs',
           name: 'jobs',
           component: JobsView,
+          props: true
+        },
+        {
+          path: 'submit',
+          name: 'submit-job',
+          component: SubmitJobView,
           props: true
         },
         {

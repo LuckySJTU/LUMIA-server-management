@@ -251,6 +251,11 @@ def submit():
     result = slurmrest("submit", (request.user.login, data))
     return jsonify(result)
 
+@rbac_action("cancel-job")
+def cancel(job: int):
+    result = slurmrest("cancel", (request.user.login, job))
+    return jsonify(result)
+
 
 @check_jwt
 def metrics(metric):

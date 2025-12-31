@@ -86,6 +86,21 @@ export interface ClusterJob {
   user_name: string
 }
 
+export interface SubmitJobRequest {
+  partition: string
+  qos: string
+  cpus_per_task: number
+  memory_per_node: number
+  gpus_per_node: number
+  job_name: string
+  standard_output: string
+  standard_error: string
+  script: string
+}
+
+export type SubmitJobResponse = Record<string, unknown>
+export type CancelJobResponse = Record<string, unknown>
+
 export interface ClusterTRES {
   count: number
   id: number
@@ -814,6 +829,17 @@ export function useGatewayAPI() {
     return await restAPI.get<ClusterJob[]>(`/agents/${cluster}/jobs`)
   }
 
+  async function submit(
+    cluster: string,
+    payload: SubmitJobRequest
+  ): Promise<SubmitJobResponse> {
+    return await restAPI.post<SubmitJobResponse>(`/agents/${cluster}/submit`, payload)
+  }
+
+  async function cancel(cluster: string, job: number): Promise<CancelJobResponse> {
+    return await restAPI.del<CancelJobResponse>(`/agents/${cluster}/cancel/${job}`)
+  }
+
   async function job(cluster: string, job: number): Promise<ClusterIndividualJob> {
     return await restAPI.get<ClusterIndividualJob>(`/agents/${cluster}/job/${job}`)
   }
@@ -970,6 +996,8 @@ export function useGatewayAPI() {
     users,
     stats,
     jobs,
+    submit,
+    cancel,
     job,
     nodes,
     node,

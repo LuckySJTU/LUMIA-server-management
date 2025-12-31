@@ -21,3 +21,5 @@ actions:
     Access to cache information and metrics in settings panel.
   submit-job: |
     Submit a job to the cluster.
+  cancel-job: |
+    Cancel a job in the cluster.

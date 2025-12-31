@@ -13,11 +13,12 @@ import { useRouter, useRoute } from 'vue-router'
 import type { LocationQueryRaw } from 'vue-router'
 import ClusterMainLayout from '@/components/ClusterMainLayout.vue'
 import { useClusterDataPoller } from '@/composables/DataPoller'
-import { jobRequestedGPU, jobAllocatedGPU } from '@/composables/GatewayAPI'
+import { jobRequestedGPU, jobAllocatedGPU, useGatewayAPI } from '@/composables/GatewayAPI'
 import type { ClusterIndividualJob } from '@/composables/GatewayAPI'
 import JobStatusBadge from '@/components/job/JobStatusBadge.vue'
 import JobProgress from '@/components/job/JobProgress.vue'
 import { useRuntimeStore } from '@/stores/runtime'
+import { useAuthStore } from '@/stores/auth'
 import ErrorAlert from '@/components/ErrorAlert.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import { ChevronLeftIcon } from '@heroicons/vue/20/solid'
@@ -30,8 +31,13 @@ import JobResources from '@/components/job/JobResources.vue'
 const { cluster, id } = defineProps<{ cluster: string; id: number }>()
 
 const runtimeStore = useRuntimeStore()
+const authStore = useAuthStore()
+const gatewayAPI = useGatewayAPI()
 const router = useRouter()
 const route = useRoute()
+const cancelConfirmOpen = ref(false)
+const canceling = ref(false)
+const cancelError = ref('')
 
 function backToJobs() {
   router.push({
@@ -173,6 +179,27 @@ const jobFieldsContent = computed(
   }
 )
 
+const canCancel = computed(() => {
+  if (!data.value) return false
+  const isOwner = authStore.username && data.value.user === authStore.username
+  const states = data.value.state.current
+  const isActive = states.includes('PENDING') || states.includes('RUNNING')
+  return Boolean(isOwner && isActive)
+})
+
+async function cancelJob() {
+  cancelError.value = ''
+  canceling.value = true
+  try {
+    await gatewayAPI.cancel(cluster, id)
+    cancelConfirmOpen.value = false
+  } catch (error) {
+    cancelError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    canceling.value = false
+  }
+}
+
 /* highlight this field for some time */
 function highlightField(field: JobField) {
   displayTags.value[field].highlight = true
@@ -232,9 +259,22 @@ onMounted(() => {
             All job settings
           </p>
         </div>
-        <div>
-          <JobStatusBadge :status="data.state.current" :large="true" />
-          <span v-if="data.state.reason != 'None'">{{ data.state.reason }}</span>
+        <div class="flex flex-col items-end gap-2">
+          <div class="flex items-center gap-3">
+            <JobStatusBadge :status="data.state.current" :large="true" />
+            <span v-if="data.state.reason != 'None'">{{ data.state.reason }}</span>
+            <button
+              v-if="canCancel"
+              type="button"
+              class="inline-flex items-center rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-xs hover:bg-red-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:cursor-not-allowed disabled:opacity-60"
+              @click="cancelConfirmOpen = true"
+            >
+              Cancel Job
+            </button>
+          </div>
+          <p v-if="cancelError" class="mt-2 text-sm font-semibold text-red-600">
+            {{ cancelError }}
+          </p>
         </div>
       </div>
       <div class="flex flex-wrap">
@@ -273,6 +313,37 @@ onMounted(() => {
               </div>
             </dl>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="cancelConfirmOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+    >
+      <div class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl dark:bg-slate-900">
+        <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Cancel job {{ id }}?</h3>
+        <p class="mt-2 text-sm text-gray-600 dark:text-gray-300">
+          This will stop the job if it is currently queued or running.
+        </p>
+        <div class="mt-6 flex items-center justify-end gap-3">
+          <button
+            type="button"
+            class="rounded-md border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-slate-700 dark:text-gray-200 dark:hover:bg-slate-800"
+            :disabled="canceling"
+            @click="cancelConfirmOpen = false"
+          >
+            Back
+          </button>
+          <button
+            type="button"
+            class="rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-xs hover:bg-red-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:cursor-not-allowed disabled:opacity-60"
+            :disabled="canceling"
+            @click="cancelJob"
+          >
+            <span v-if="canceling">Canceling…</span>
+            <span v-else>Confirm Cancel</span>
+          </button>
         </div>
       </div>
     </div>

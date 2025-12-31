@@ -217,6 +217,8 @@ def request_agent(
                 headers=headers,
                 json=request.json,
             )
+        elif request.method == "DELETE":
+            return session.delete(url, headers=headers)
         else:
             abort(500, f"Unsupported request method {request.method}")
     except aiohttp.ClientConnectionError as err:
@@ -336,6 +338,12 @@ def myrequests(cluster: str):
 @validate_cluster
 def submit(cluster: str):
     return proxy_agent(cluster, "submit", request.token)
+
+
+@check_jwt
+@validate_cluster
+def cancel(cluster: str, job: int):
+    return proxy_agent(cluster, f"cancel/{job}", request.token)
 
 
 @check_jwt
