@@ -775,7 +775,7 @@ def collect_running_jobs_on_nodes(nodelist):
             parts = line.split()
             if len(parts) >= 3:
                 if '[' in parts[2]:
-                    nodes = ['node'+x for x in parts[2][5:-1].split(',')]
+                    nodes = ['g'+x for x in parts[2][2:-1].split(',')]
                 else:
                     nodes = [parts[2]]
                 for node in nodes:
