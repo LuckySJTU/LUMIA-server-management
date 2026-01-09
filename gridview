@@ -16,13 +16,13 @@ import threading
 import multiprocessing as mp
 import traceback
 
-try:
-    import psutil
-except ImportError:
-    print("Please: pip install psutil", file=sys.stderr)
-    sys.exit(1)
+# try:
+#     import psutil
+# except ImportError:
+#     print("Please: pip install psutil", file=sys.stderr)
+#     sys.exit(1)
 
-VERSION = 'v3.0'
+VERSION = 'v3.0.1m'
 
 # -----------------------------
 # 并行采集框架：DataBus + 周期采集 + 子进程超时
@@ -201,7 +201,6 @@ def get_node_number():
         data = stdout.decode().splitlines()
         node_number = len(data)
         nodename_list = [re.search(r'NodeName=(\S+)', line).group(1) for line in data]
-        nodename_list = [name[4:] if 'node' in name else name[0] for name in nodename_list]
         return node_number, nodename_list
     else:
         return 0, []
@@ -212,6 +211,7 @@ def print_time(stdscr):
 
 def print_node_name(stdscr, nodename_list):
     height, width = stdscr.getmaxyx()
+    nodename_list = [name[3:] if 'g00' in name else name[0] for name in nodename_list]
     for i in range(1, len(nodename_list) + 1):
         if i < height:
             stdscr.addstr(i, 0, nodename_list[i - 1], curses.color_pair(6))
@@ -485,7 +485,7 @@ def collect_online_user_msg():
     return f"U {len(lines)}/{local}"
 
 def collect_storage_usage():
-    storage_paths = ['/home', '/data0', '/data1', '/data2', '/data3']
+    storage_paths = ['/data/home']
     out = {}
     for p in storage_paths:
         if os.path.exists(p):
@@ -762,7 +762,7 @@ def collect_running_jobs_on_nodes(nodelist):
     返回 dict: nodename -> {"state": state_str, "jobs": [(jobid, priority, nodelist_str), ...]}
     """
     # 注意：state 不在这里取，渲染时用 savai 的 state；这里只采 job 列表
-    out = {}
+    out = {node:[] for node in nodelist}
     command = "squeue --sort=i --Format=JobID,PriorityLong,NodeList"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, _ = process.communicate()
@@ -774,9 +774,12 @@ def collect_running_jobs_on_nodes(nodelist):
         for line in lines[1:]:
             parts = line.split()
             if len(parts) >= 3:
-                if parts[2] not in out:
-                    out[parts[2]] = []
-                out[parts[2]].append((parts[0], parts[1], parts[2]))
+                if '[' in parts[2]:
+                    nodes = ['node'+x for x in parts[2][5:-1].split(',')]
+                else:
+                    nodes = [parts[2]]
+                for node in nodes:
+                    out[node].append((parts[0], parts[1], parts[2]))
     return out
 
 # -----------------------------
@@ -1056,12 +1059,12 @@ def gridview(stdscr):
     # 注册采集器（默认 1 秒）
     manager.add("savai", collect_savai, interval_s=3.0, timeout_s=10.0)
     manager.add("job_states", collect_all_job_states, interval_s=1.0, timeout_s=5.0)
-    manager.add("online_users", collect_online_user_msg, interval_s=10.0, timeout_s=5.0)
+    # manager.add("online_users", collect_online_user_msg, interval_s=10.0, timeout_s=5.0)
     manager.add("storage", collect_storage_usage, interval_s=60.0, timeout_s=5.0)     # NFS 慢：给更短 timeout
     manager.add("job_table", JobTableFn(), interval_s=1.0, timeout_s=2.0)
-    manager.add_thread_only("net_speed", net_fn, interval_s=1.0)
+    # manager.add_thread_only("net_speed", net_fn, interval_s=1.0)
     manager.add("running_jobs", RunningJobsFn(), interval_s=1.0, timeout_s=3.0)      # 每节点 squeue：可能慢
-    manager.add("kill_overload", collect_kill_overload_and_log, interval_s=3.0, timeout_s=5.0)
+    # manager.add("kill_overload", collect_kill_overload_and_log, interval_s=3.0, timeout_s=5.0)
 
     manager.start_all()
     # import pdb; pdb.set_trace()
