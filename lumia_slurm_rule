@@ -8,14 +8,14 @@ import time
 import logging
 from logging.handlers import TimedRotatingFileHandler
 
-LOG_PATH = "/var/log/slurm/lumia_slurm_rule_2.log"
+LOG_PATH = "/var/log/slurm/lumia_slurm_rule.log"
 STATE_PATH = "/etc/slurm/lumia_rule.pkl"
 
 HIGH_PRIORITY_MIN = 2000
 LOW_PRIORITY_MAX = 1000
 PROTECTED_SINGLE_JOB_GPU_MAX = 8
 
-logger = logging.getLogger("lumia_slurm_rule_2")
+logger = logging.getLogger("lumia_slurm_rule")
 logger.setLevel(logging.DEBUG)
 file_handler = TimedRotatingFileHandler(LOG_PATH, when="midnight", interval=1, backupCount=7)
 file_handler.setLevel(logging.DEBUG)
