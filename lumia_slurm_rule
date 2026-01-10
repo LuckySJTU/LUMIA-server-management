@@ -68,8 +68,11 @@ def extract_job_info():
     jobstate_pattern = re.compile(r"JobState=([A-Z_]+)")
     nodelist_pattern = re.compile(r'NodeList=([\w\d]+)')
     partition_pattern = re.compile(r"Partition=([^\s]+)")
-    tres_pattern = re.compile(
-        r"TRES=cpu=(\d+),mem=(\d+)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?"
+    reqtres_pattern = re.compile(
+        r"ReqTRES=cpu=(\d+),mem=(\d+(?:\.\d+)?)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?"
+    )
+    alloctres_pattern = re.compile(
+        r"AllocTRES=cpu=(\d+),mem=(\d+(?:\.\d+)?)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?"
     )
     num_nodes_pattern = re.compile(r"NumNodes=(\d+)")
     tres_per_node_pattern = re.compile(r"TresPerNode=[^\s]*gpu[:=](\d+)")
@@ -84,13 +87,14 @@ def extract_job_info():
         jobstate_match = jobstate_pattern.search(job)
         nodelist_match = nodelist_pattern.search(job)
         partition_match = partition_pattern.search(job)
-        tres_match = tres_pattern.search(job)
+        reqtres_match = reqtres_pattern.search(job)
+        alloctres_match = alloctres_pattern.search(job)
         num_nodes_match = num_nodes_pattern.search(job)
         tres_per_node_match = tres_per_node_pattern.search(job)
         req_exc_node_match = req_exc_node_pattern.search(job)
         reason_match = reason_pattern.search(job)
 
-        if not (jobid_match and userid_match and priority_match and jobstate_match and partition_match and tres_match):
+        if not (jobid_match and userid_match and priority_match and jobstate_match and partition_match and reqtres_match):
             continue
 
         jobid = jobid_match.group(1)
@@ -101,8 +105,12 @@ def extract_job_info():
         nodelist = nodelist_match.group(1) if nodelist_match else ""
         nodelist = expand_nodelist(nodelist)
         partition = partition_match.group(1).split(",")
+        if alloctres_match:
+            tres_match = alloctres_match
+        else:
+            tres_match = reqtres_match
         cpu = int(tres_match.group(1))
-        mem = int(tres_match.group(2)) * (1024 if tres_match.group(3) == "G" else 1)
+        mem = int(float(tres_match.group(2))) * (1024 if tres_match.group(3) == "G" else 1)
         gpu = int(tres_match.group(6)) if tres_match.group(6) else 0
         num_nodes = int(num_nodes_match.group(1)) if num_nodes_match else int(tres_match.group(4))
         gpu_per_node = int(tres_per_node_match.group(1)) if tres_per_node_match else 0
