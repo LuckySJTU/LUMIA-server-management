@@ -1,39 +1,79 @@
 #!/bin/python3
+import math
+import pickle
+import random
 import re
 import subprocess
-import pickle
 import time
 import logging
 from logging.handlers import TimedRotatingFileHandler
 
-logger = logging.getLogger('lumia_slurm_rule')
+LOG_PATH = "/var/log/slurm/lumia_slurm_rule_2.log"
+STATE_PATH = "/etc/slurm/lumia_rule.pkl"
+
+HIGH_PRIORITY_MIN = 2000
+LOW_PRIORITY_MAX = 1000
+PROTECTED_SINGLE_JOB_GPU_MAX = 8
+
+logger = logging.getLogger("lumia_slurm_rule_2")
 logger.setLevel(logging.DEBUG)
-file_handler = TimedRotatingFileHandler("/var/log/slurm/lumia_slurm_rule.log", when='midnight', interval=1, backupCount=7)
+file_handler = TimedRotatingFileHandler(LOG_PATH, when="midnight", interval=1, backupCount=7)
 file_handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
-def extract_job_info():
-    command = "/usr/bin/scontrol show job"
+
+def run_command(command):
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate()
-
     if process.returncode != 0:
-        logger.error(stderr.decode('utf-8'))
+        logger.error(stderr.decode("utf-8"))
+        return None
+    return stdout.decode("utf-8")
+
+
+def expand_nodelist(nodelist):
+    if not nodelist or nodelist == "(null)":
+        return []
+    output = run_command("/usr/bin/scontrol show hostnames {}".format(nodelist))
+    if output is None:
+        return []
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def load_preempt_history():
+    try:
+        with open(STATE_PATH, "rb") as f:
+            return pickle.load(f)
+    except (FileNotFoundError, EOFError, pickle.UnpicklingError):
+        return {}
+
+
+def save_preempt_history(data):
+    with open(STATE_PATH, "wb") as f:
+        pickle.dump(data, f, protocol=2)
+
+
+def extract_job_info():
+    data = run_command("/usr/bin/scontrol show job")
+    if data is None:
         return -1
 
-    data = stdout.decode('utf-8')
-    job_data = re.split(r'\n\s*\n', data.strip())
+    job_data = re.split(r"\n\s*\n", data.strip())
 
-    jobid_pattern = re.compile(r'JobId=(\d+)')
+    jobid_pattern = re.compile(r"JobId=(\d+)")
     userid_pattern = re.compile(r'UserId=([\w\d]+)')
-    priority_pattern = re.compile(r'Priority=(\d+)')
-    jobstate_pattern = re.compile(r'JobState=([\w]+)')
+    priority_pattern = re.compile(r"Priority=(\d+)")
+    jobstate_pattern = re.compile(r"JobState=([A-Z_]+)")
     nodelist_pattern = re.compile(r'NodeList=([\w\d]+)')
-    partition_pattern = re.compile(r'Partition=([\w,]+)')
-    tres_pattern = re.compile(r'TRES=cpu=(\d+),mem=(\d+)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?')
-    req_exc_node_pattern = re.compile(r'ReqNodeList=([\w\d]+) ExcNodeList=([\w\d]+)')
+    partition_pattern = re.compile(r"Partition=([^\s]+)")
+    tres_pattern = re.compile(
+        r"TRES=cpu=(\d+),mem=(\d+)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?"
+    )
+    num_nodes_pattern = re.compile(r"NumNodes=(\d+)")
+    tres_per_node_pattern = re.compile(r"TresPerNode=[^\s]*gpu[:=](\d+)")
+    req_exc_node_pattern = re.compile(r"ReqNodeList=([^\s]*)\s+ExcNodeList=([^\s]*)")
     reason_pattern = re.compile(r'Reason=([\w,]+)')
 
     result = {}
@@ -45,282 +85,369 @@ def extract_job_info():
         nodelist_match = nodelist_pattern.search(job)
         partition_match = partition_pattern.search(job)
         tres_match = tres_pattern.search(job)
+        num_nodes_match = num_nodes_pattern.search(job)
+        tres_per_node_match = tres_per_node_pattern.search(job)
         req_exc_node_match = req_exc_node_pattern.search(job)
         reason_match = reason_pattern.search(job)
 
-        if jobid_match and userid_match and priority_match and jobstate_match and partition_match and tres_match:
-            jobid = jobid_match.group(1)
-            userid = userid_match.group(1)
-            priority = int(priority_match.group(1))
-            jobstate = jobstate_match.group(1)
-            nodelist = nodelist_match.group(1) if nodelist_match else ''
-            partition = partition_match.group(1).split(',')
-            cpu = int(tres_match.group(1))
-            mem = int(tres_match.group(2)) * (1024 if tres_match.group(3) == 'G' else 1)
-            gpu = int(tres_match.group(6)) if tres_match.group(6) else 0
-            reqnodelist = req_exc_node_match.group(1).split(',') if req_exc_node_match else None
-            excnodelist = req_exc_node_match.group(2).split(',') if req_exc_node_match else None
-            reason = reason_match.group(1) if reason_match else None
+        if not (jobid_match and userid_match and priority_match and jobstate_match and partition_match and tres_match):
+            continue
 
-            job_info = {
-                'jobid': jobid,
-                'userid': userid,
-                'priority': priority,
-                'jobstate': jobstate,
-                'nodelist': nodelist,
-                'partition': partition,
-                'cpu': cpu,
-                'mem': mem,
-                'gpu': gpu,
-                'reqnode': reqnodelist,
-                'excnode': excnodelist,
-                'reason': reason,
-            }
+        jobid = jobid_match.group(1)
+        userid_raw = userid_match.group(1)
+        userid = userid_raw.split("(")[0]
+        priority = int(priority_match.group(1))
+        jobstate = jobstate_match.group(1)
+        nodelist = nodelist_match.group(1) if nodelist_match else ""
+        nodelist = expand_nodelist(nodelist)
+        partition = partition_match.group(1).split(",")
+        cpu = int(tres_match.group(1))
+        mem = int(tres_match.group(2)) * (1024 if tres_match.group(3) == "G" else 1)
+        gpu = int(tres_match.group(6)) if tres_match.group(6) else 0
+        num_nodes = int(num_nodes_match.group(1)) if num_nodes_match else int(tres_match.group(4))
+        gpu_per_node = int(tres_per_node_match.group(1)) if tres_per_node_match else 0
+        if gpu_per_node == 0 and num_nodes > 0:
+            gpu_per_node = int(math.ceil(float(gpu) / float(num_nodes)))
+        cpu_per_node = int(math.ceil(float(cpu) / float(num_nodes))) if num_nodes > 0 else cpu
+        mem_per_node = int(math.ceil(float(mem) / float(num_nodes))) if num_nodes > 0 else mem
+        reqnodelist = None
+        excnodelist = None
+        if req_exc_node_match:
+            reqnodelist = req_exc_node_match.group(1)
+            excnodelist = req_exc_node_match.group(2)
+            reqnodelist = expand_nodelist(reqnodelist)
+            excnodelist = expand_nodelist(excnodelist)
+        reason = reason_match.group(1) if reason_match else None
 
-            if userid not in result:
-                result[userid] = []
+        job_info = {
+            "jobid": jobid,
+            "userid": userid,
+            "priority": priority,
+            "jobstate": jobstate,
+            "nodelist": nodelist,
+            "partition": partition,
+            "cpu": cpu,
+            "mem": mem,
+            "gpu": gpu,
+            "num_nodes": num_nodes,
+            "cpu_per_node": cpu_per_node,
+            "mem_per_node": mem_per_node,
+            "gpu_per_node": gpu_per_node,
+            "reqnode": reqnodelist,
+            "excnode": excnodelist,
+            "reason": reason,
+        }
 
-            result[userid].append(job_info)
+        if userid not in result:
+            result[userid] = []
+        result[userid].append(job_info)
 
     return result
+
 
 def filter_jobs(job_info):
     schedulable_jobs = []
     terminable_jobs = []
 
     for userid, jobs in job_info.items():
-        running_jobs = [job for job in jobs if job['jobstate'] == 'RUNNING']
-        # running_jobs = [job for job in jobs if job['jobstate'] == 'RUNNING' and 'cpu' not in job['partition']]
+        running_jobs = [
+            job for job in jobs if job["jobstate"] == "RUNNING" and "cpu" not in job["partition"]
+        ]
+        running_job_count = len(running_jobs)
 
         for job in jobs:
-            if 'debug' in job['partition'] or 'cpu' in job['partition']:
+            if "debug" in job["partition"] or "cpu" in job["partition"]:
                 continue
-            if job['jobstate'] == 'PENDING' and job['priority'] >= 2000 and job['reason'] in ['Resources', 'Priority']:
-                ### 正在排队的高优任务可以被调度
-                ### 不允许无法调度的任务进入
-                schedulable_jobs.append(job)
-            if job['jobstate'] == 'RUNNING' and job['priority'] <= 1000 and len(running_jobs) > 1:
-                ### 筛选可以被结束的任务，不包含debug等
-                ### 如果只有一个任务正在跑，那么不能结束
+            if job["jobstate"] == "PENDING" and job["priority"] >= HIGH_PRIORITY_MIN:
+                if job["reason"] in ["Resources", "Priority"]:
+                    schedulable_jobs.append(job)
+            if job["jobstate"] == "RUNNING" and job["priority"] <= LOW_PRIORITY_MAX:
+                if running_job_count == 1 and job["gpu"] <= PROTECTED_SINGLE_JOB_GPU_MAX:
+                    continue
                 terminable_jobs.append(job)
-        
-        # if len(running_jobs) == 1:
-        #     single_running_job = running_jobs[0]
-        #     terminable_jobs = [job for job in terminable_jobs if job['jobid'] != single_running_job['jobid']]
-
 
     return schedulable_jobs, terminable_jobs
 
+
 def get_avai_resource():
-    command = "/usr/bin/scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'"
-    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-    if process.returncode == 0:
-        data = stdout.decode('utf-8')
-        lines = data.strip().split('\n')
-
-        result = {}
-
-        node_pattern = re.compile(r'NodeName=(\w+)')
-        state_pattern = re.compile(r'   State=([\w\+]+)')
-        cfg_pattern = re.compile(r'   CfgTRES=cpu=(\d+),mem=(\d+)([MG]),billing=\d+,gres/gpu=(\d+)')
-        alloc_pattern = re.compile(r'   AllocTRES=cpu=(\d+),mem=(\d+)([MG]),gres/gpu=(\d+)')
-
-        for line in lines:
-            if 'CfgTRES' in line:
-                match = cfg_pattern.match(line)
-                if match:
-                    cpu, mem, mem_unit, gpu = match.groups()
-                    result[nodename]['cfg']['cpu'] = int(cpu)
-                    mem_value = int(mem) * (1024 if mem_unit == 'G' else 1)
-                    mem_value -= 10240
-                    result[nodename]['cfg']['mem'] = mem_value
-                    result[nodename]['cfg']['gpu'] = int(gpu)
-            elif 'AllocTRES' in line:
-                match = alloc_pattern.match(line)
-                if match:
-                    cpu, mem, mem_unit, gpu = match.groups()
-                    result[nodename]['alloc']['cpu'] = int(cpu)
-                    mem_value = int(mem) * (1024 if mem_unit == 'G' else 1)
-                    result[nodename]['alloc']['mem'] = mem_value
-                    result[nodename]['alloc']['gpu'] = int(gpu)
-            elif 'NodeName' in line:
-                match = node_pattern.match(line)
-                if match:
-                    nodename = match.group(1)
-                    result[nodename] = {'state':'UNKNOWN','alloc':{'cpu':0,'mem':0,'gpu':0},'cfg':{'cpu':0,'mem':0,'gpu':0}}
-            elif 'State' in line:
-                match = state_pattern.match(line)
-                if match:
-                    state = match.group(1)
-                    result[nodename]['state'] = state
-        for nodename in result.keys():
-            if 'DRAIN' in result[nodename]['state'] or 'DOWN' in result[nodename]['state']:
-                result[nodename]['cfg'] = {'cpu':0,'mem':0,'gpu':0}
-        return result
-    else:
-        logger.error(stderr.decode('utf-8'))
+    data = run_command("/usr/bin/scontrol show node | grep -E 'NodeName|State|CfgTRES|AllocTRES'")
+    if data is None:
         return -1
 
-def get_partition():
-    command = "/usr/bin/sinfo -N"
-    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = process.communicate()
-    if process.returncode != 0:
-        logger.error(stderr.decode('utf-8'))
-        return None
-    else:
-        data = stdout.decode('utf-8')
-        lines = data.strip().split('\n')
-        partition = {}
-        for line in lines[1:]:
-            node, _, p, _ = line.split()
-            p = p.strip('*')
-            if p not in partition:
-                partition[p] = []
-            partition[p].append(node)
-        return partition
+    lines = data.strip().split("\n")
+    result = {}
 
-def requeue_job(jobs):
-    with open("/etc/slurm/lumia_rule.pkl", 'rb') as f:
-        data = pickle.load(f)
+    node_pattern = re.compile(r"NodeName=(\w+)")
+    state_pattern = re.compile(r"   State=([\w\+]+)")
+    cfg_pattern = re.compile(r"   CfgTRES=cpu=(\d+),mem=(\d+)([MG]),billing=\d+,gres/gpu=(\d+)")
+    alloc_pattern = re.compile(r"   AllocTRES=cpu=(\d+),mem=(\d+)([MG]),gres/gpu=(\d+)")
+
+    nodename = None
+    for line in lines:
+        if "NodeName" in line:
+            match = node_pattern.match(line)
+            if match:
+                nodename = match.group(1)
+                result[nodename] = {
+                    "state": "UNKNOWN",
+                    "alloc": {"cpu": 0, "mem": 0, "gpu": 0},
+                    "cfg": {"cpu": 0, "mem": 0, "gpu": 0},
+                }
+        elif "State" in line and nodename:
+            match = state_pattern.match(line)
+            if match:
+                state = match.group(1)
+                result[nodename]["state"] = state
+        elif "CfgTRES" in line and nodename:
+            match = cfg_pattern.match(line)
+            if match:
+                cpu, mem, mem_unit, gpu = match.groups()
+                mem_value = int(mem) * (1024 if mem_unit == "G" else 1)
+                mem_value -= 10240
+                result[nodename]["cfg"] = {
+                    "cpu": int(cpu),
+                    "mem": mem_value,
+                    "gpu": int(gpu),
+                }
+        elif "AllocTRES" in line and nodename:
+            match = alloc_pattern.match(line)
+            if match:
+                cpu, mem, mem_unit, gpu = match.groups()
+                mem_value = int(mem) * (1024 if mem_unit == "G" else 1)
+                result[nodename]["alloc"] = {
+                    "cpu": int(cpu),
+                    "mem": mem_value,
+                    "gpu": int(gpu),
+                }
+    for node in result.keys():
+        if "DRAIN" in result[node]["state"] or "DOWN" in result[node]["state"]:
+            result[node]["cfg"] = {"cpu": 0, "mem": 0, "gpu": 0}
+    return result
+
+
+def get_partition():
+    data = run_command("/usr/bin/sinfo -N")
+    if data is None:
+        return None
+    lines = data.strip().split("\n")
+    partition = {}
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        node = parts[0]
+        p = parts[2].strip("*")
+        if p not in partition:
+            partition[p] = []
+        partition[p].append(node)
+    return partition
+
+
+def get_available_nodes(job, node_on_partition):
+    avai_node = job["reqnode"]
+    if not avai_node:
+        nodes = []
+        for p in job["partition"]:
+            nodes.extend(node_on_partition.get(p, []))
+        avai_node = list(set(nodes))
+    if job["excnode"]:
+        for p in job["excnode"]:
+            if p in avai_node:
+                avai_node.remove(p)
+    return avai_node
+
+
+def build_node_to_jobs(terminable_jobs):
+    node_to_jobs = {}
+    for job in terminable_jobs:
+        for node in job["nodelist"]:
+            node_to_jobs.setdefault(node, []).append(job)
+    return node_to_jobs
+
+
+def requeue_jobs(jobs):
+    history = load_preempt_history()
     stamp = time.time()
     for job in jobs:
-        data[job['userid']] = stamp
-        # TODO requeu some job
-        command = "/usr/bin/scontrol requeue " + job['jobid']
-        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
-        if process.returncode != 0:
-            logger.error(stderr.decode('utf-8'))
-            command = "/usr/bin/scancel " + job['jobid']
-            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, stderr = process.communicate()
-            if process.returncode != 0:
-                logger.error(stderr.decode('utf-8'))
-                logger.fatal("Job {} can not be requeued or cancelled".format(job['jobid']))
+        history[job["userid"]] = stamp
+        command = "/usr/bin/scontrol requeue " + job["jobid"]
+        output = run_command(command)
+        if output is None:
+            command = "/usr/bin/scancel " + job["jobid"]
+            output = run_command(command)
+            if output is None:
+                logger.fatal("Job {} can not be requeued or cancelled".format(job["jobid"]))
             else:
-                data[job['userid']] = stamp
-                logger.warning("Job {} has been cancelled".format(job['jobid']))
+                history[job["userid"]] = stamp
+                logger.warning("Job {} has been cancelled".format(job["jobid"]))
         else:
-            data[job['userid']] = stamp
-            logger.warning("Job {} has been requeued".format(job['jobid']))
-    with open("/etc/slurm/lumia_rule.pkl", 'wb') as f:
-        pickle.dump(data, f, protocol=2)
-    logger.debug(data)
-    return
+            history[job["userid"]] = stamp
+            logger.warning("Job {} has been requeued".format(job["jobid"]))
+    save_preempt_history(history)
+    logger.debug(history)
+
+
+def update_alloc(node_resources, job, delta):
+    for node in job["nodelist"]:
+        for resource, key in [("cpu", "cpu_per_node"), ("mem", "mem_per_node"), ("gpu", "gpu_per_node")]:
+            node_resources[node]["alloc"][resource] += delta * job[key]
+
+
+def pick_single_job_candidates(job, available_resources, node_to_jobs, history):
+    candidates = []
+    for node, available in available_resources.items():
+        for tjob in node_to_jobs.get(node, []):
+            if tjob["jobid"] == job["jobid"]:
+                continue
+            if available["cpu"] + tjob["cpu_per_node"] < job["cpu_per_node"]:
+                continue
+            if available["mem"] + tjob["mem_per_node"] < job["mem_per_node"]:
+                continue
+            if available["gpu"] + tjob["gpu_per_node"] < job["gpu_per_node"]:
+                continue
+            diff = abs(tjob["gpu_per_node"] - job["gpu_per_node"])
+            last = history.get(tjob["userid"], 0)
+            candidates.append((diff, last, tjob))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    return candidates[0][2]
+
+
+def find_jobs_to_free_on_node(job, node, available, node_to_jobs, history):
+    need_cpu = max(0, job["cpu_per_node"] - available["cpu"])
+    need_mem = max(0, job["mem_per_node"] - available["mem"])
+    need_gpu = max(0, job["gpu_per_node"] - available["gpu"])
+    if need_cpu == 0 and need_mem == 0 and need_gpu == 0:
+        return []
+    jobs = list(node_to_jobs.get(node, []))
+    jobs.sort(key=lambda j: (-j["gpu_per_node"], history.get(j["userid"], 0)))
+    selected = []
+    cur_cpu = 0
+    cur_mem = 0
+    cur_gpu = 0
+    for tjob in jobs:
+        selected.append(tjob)
+        cur_cpu += tjob["cpu_per_node"]
+        cur_mem += tjob["mem_per_node"]
+        cur_gpu += tjob["gpu_per_node"]
+        if cur_cpu >= need_cpu and cur_mem >= need_mem and cur_gpu >= need_gpu:
+            return selected
+    return None
+
 
 def check_resources(schedulable_jobs, terminable_jobs):
     node_resources = get_avai_resource()
     node_on_partition = get_partition()
+    if node_resources == -1 or node_on_partition is None:
+        return
+
+    history = load_preempt_history()
+    node_to_jobs = build_node_to_jobs(terminable_jobs)
+
+    schedulable_jobs.sort(key=lambda j: j["priority"], reverse=True)
     for schedulable_job in schedulable_jobs:
-        avai_node = schedulable_job['reqnode']
-        if avai_node is None:
-            avai_node = sum([node_on_partition[p] for p in schedulable_job['partition']], [])
-            avai_node = list(set(avai_node))
-            if schedulable_job['excnode'] is not None:
-                for p in schedulable_job['excnode']:
-                    avai_node.remove(p)
-        assert len(avai_node) > 0
-        logger.debug(avai_node)
-        available_resources = {node:
-            {
-            'cpu': node_resources[node]['cfg']['cpu']-node_resources[node]['alloc']['cpu'],
-            'mem': node_resources[node]['cfg']['mem']-node_resources[node]['alloc']['mem'],
-            'gpu': node_resources[node]['cfg']['gpu']-node_resources[node]['alloc']['gpu'],
-            } for node in avai_node
-        }
-        required_resources = {
-            'cpu': schedulable_job['cpu'],
-            'mem': schedulable_job['mem'],
-            'gpu': schedulable_job['gpu']
+        avai_node = get_available_nodes(schedulable_job, node_on_partition)
+        if not avai_node:
+            continue
+        available_resources = {
+            node: {
+                "cpu": node_resources[node]["cfg"]["cpu"] - node_resources[node]["alloc"]["cpu"],
+                "mem": node_resources[node]["cfg"]["mem"] - node_resources[node]["alloc"]["mem"],
+                "gpu": node_resources[node]["cfg"]["gpu"] - node_resources[node]["alloc"]["gpu"],
+            }
+            for node in avai_node
         }
 
-        for node, available_resource in available_resources.items(): 
-            sufficient_resources = True
-            for resource, required in required_resources.items():
-                if available_resource[resource] < required:
-                    sufficient_resources = False
-                    break
-            if sufficient_resources:
-                logger.warning("Job {} can be allocated directly to {}".format(schedulable_job['jobid'], node))
-                schedulable_jobs.remove(schedulable_job)
-                exit(0)
-        else:
-            logger.info("Resource not enough, try to requeue some jobs")
-        logger.debug(available_resources)
-        candidate_jobs = []
-        for node, available_resource in available_resources.items(): 
-            for terminable_job in terminable_jobs:
-                if terminable_job['nodelist'] == node:
-                    for resource in available_resource:
-                        if required_resources[resource] > available_resource[resource] + terminable_job[resource]:
-                            break
-                    else:
-                        candidate_jobs.append(terminable_job)
-        logger.debug([job['jobid'] for job in candidate_jobs])
-        if len(candidate_jobs) == 1:
-            logger.warning("Job {} can be allocated by requeuing job {} ".format(schedulable_job['jobid'], candidate_jobs[0]['jobid']))
-            requeue_job(candidate_jobs)
-            terminable_jobs.remove(candidate_jobs[0])
-            for resource in ['cpu','mem','gpu']:
-                node_resources[candidate_jobs[0]['nodelist']]['alloc'][resource] -= candidate_jobs[0][resource]
-                node_resources[candidate_jobs[0]['nodelist']]['alloc'][resource] += schedulable_job[resource]
+        required_nodes = max(1, schedulable_job["num_nodes"])
+        ready_nodes = []
+        for node, avail in available_resources.items():
+            if (
+                avail["cpu"] >= schedulable_job["cpu_per_node"]
+                and avail["mem"] >= schedulable_job["mem_per_node"]
+                and avail["gpu"] >= schedulable_job["gpu_per_node"]
+            ):
+                ready_nodes.append(node)
+
+        if len(ready_nodes) >= required_nodes:
+            logger.warning("Job {} can be allocated directly".format(schedulable_job["jobid"]))
             continue
 
-        if len(candidate_jobs) > 1:
-            with open("/etc/slurm/lumia_rule.pkl", 'rb') as f:
-                lately_requeue = pickle.load(f)
-            late_time, late_job = time.time(), None
-            for job in candidate_jobs:
-                user_preempt_time = lately_requeue.get(job['userid'],0)
-                if user_preempt_time < late_time:
-                    late_time = user_preempt_time
-                    late_job = job
-            if late_job is not None:
-                logger.warning("Job {} can be allocated by requeuing job {} ".format(schedulable_job['jobid'], late_job['jobid']))
-                requeue_job([late_job])
-                terminable_jobs.remove(late_job)
-                for resource in ['cpu','mem','gpu']:
-                    node_resources[late_job['nodelist']]['alloc'][resource] -= late_job[resource]
-                    node_resources[late_job['nodelist']]['alloc'][resource] += schedulable_job[resource]
+        logger.info("Resource not enough, try to requeue some jobs")
+        if required_nodes == 1:
+            candidate = pick_single_job_candidates(
+                schedulable_job, available_resources, node_to_jobs, history
+            )
+            if candidate:
+                logger.warning(
+                    "Job {} can be allocated by requeuing job {}".format(
+                        schedulable_job["jobid"], candidate["jobid"]
+                    )
+                )
+                requeue_jobs([candidate])
+                if candidate in terminable_jobs:
+                    terminable_jobs.remove(candidate)
+                update_alloc(node_resources, candidate, -1)
                 continue
 
-        logger.info("Try to free a node")
-        for node, available_resource in available_resources.items():
-            candidate_jobs = []
-            sufficient_resources_from_terminable = False
-            for job in terminable_jobs:
-                if node == job['nodelist']:
-                    candidate_jobs.append(job)
-                    for resource in available_resource:
-                        available_resource[resource] += job[resource]
-                    for resource, required in required_resources.items():
-                        if available_resource[resource] < required:
-                            break
-                    else:
-                        logger.warning("Job {} can be allocated by requeuing {} ".format(schedulable_job['jobid'], [j['jobid'] for j in candidate_jobs]))
-                        requeue_job(candidate_jobs)
-                        sufficient_resources_from_terminable = True
-                        for j in candidate_jobs:
-                            terminable_jobs.remove(j)
-                        break
-            if sufficient_resources_from_terminable:
-                break
-            if len(candidate_jobs) > 0:
-                logger.info("Clearing {} wont satisfies {} in which node jobs are {}".format(node, schedulable_job['jobid'], [j['jobid'] for j in candidate_jobs]))
-            else:
-                logger.info("There is no requeueable job on {}".format(node))
+        logger.info("Try to free nodes for multi-node job")
+        candidates = {}
+        for node, avail in available_resources.items():
+            jobs_to_free = find_jobs_to_free_on_node(
+                schedulable_job, node, avail, node_to_jobs, history
+            )
+            if jobs_to_free is not None:
+                candidates[node] = jobs_to_free
+
+        available_nodes = ready_nodes[:]
+        freeable_nodes = [node for node in candidates.keys() if node not in ready_nodes]
+        if len(available_nodes) + len(freeable_nodes) < required_nodes:
+            logger.info("Not enough nodes can be freed for job {}".format(schedulable_job["jobid"]))
+            logger.debug(f"avaliable nodes: {available_nodes}")
+            logger.debug(f"freeable nodes: {freeable_nodes}")
+            logger.debug(f"required_nodes: {required_nodes}")
+            logger.debug(f"candidates: {candidates}")
+            continue
+
+        remaining = required_nodes - len(available_nodes)
+        if remaining > 0:
+            chosen = random.sample(freeable_nodes, remaining)
+            available_nodes.extend(chosen)
+
+        jobs_to_requeue = {}
+        for node in available_nodes:
+            for tjob in candidates.get(node, []):
+                jobs_to_requeue[tjob["jobid"]] = tjob
+
+        if not jobs_to_requeue:
+            logger.info("No requeueable jobs found for job {}".format(schedulable_job["jobid"]))
+            continue
+
+        logger.warning(
+            "Job {} can be allocated by requeuing {}".format(
+                schedulable_job["jobid"], [j["jobid"] for j in jobs_to_requeue.values()]
+            )
+        )
+        requeue_jobs(list(jobs_to_requeue.values()))
+        for tjob in list(jobs_to_requeue.values()):
+            if tjob in terminable_jobs:
+                terminable_jobs.remove(tjob)
+            update_alloc(node_resources, tjob, -1)
+        if len(list(jobs_to_requeue.values())) > 0:
+            # 如果本次执行了调度，则不再调度更多任务，等待下一轮调度
+            break
+
 
 if __name__ == "__main__":
     job_info_result = extract_job_info()
-    for user,jobs in job_info_result.items():
-        logger.debug((user,[job['jobid'] for job in jobs]))
-    if job_info_result != -1:
-        schedulable_jobs, terminable_jobs = filter_jobs(job_info_result)
-        logger.debug([job['jobid'] for job in schedulable_jobs])
-        logger.debug([job['jobid'] for job in terminable_jobs])
-        if schedulable_jobs and terminable_jobs:
-            check_resources(schedulable_jobs, terminable_jobs)
-        else:
-            logger.info("Nothing should be done")
+    if job_info_result == -1:
+        exit(1)
+    for user, jobs in job_info_result.items():
+        logger.debug((user, [job["jobid"] for job in jobs]))
+    schedulable_jobs, terminable_jobs = filter_jobs(job_info_result)
+    logger.debug([job["jobid"] for job in schedulable_jobs])
+    logger.debug([job["jobid"] for job in terminable_jobs])
+    if schedulable_jobs and terminable_jobs:
+        check_resources(schedulable_jobs, terminable_jobs)
+    else:
+        logger.info("Nothing should be done")
