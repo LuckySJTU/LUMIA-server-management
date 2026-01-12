@@ -66,7 +66,7 @@ def extract_job_info():
     userid_pattern = re.compile(r'UserId=([\w\d]+)')
     priority_pattern = re.compile(r"Priority=(\d+)")
     jobstate_pattern = re.compile(r"JobState=([A-Z_]+)")
-    nodelist_pattern = re.compile(r'NodeList=([\w\d]+)')
+    nodelist_pattern = re.compile(r'NodeList=([^\s]+)')
     partition_pattern = re.compile(r"Partition=([^\s]+)")
     reqtres_pattern = re.compile(
         r"ReqTRES=cpu=(\d+),mem=(\d+(?:\.\d+)?)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?"
