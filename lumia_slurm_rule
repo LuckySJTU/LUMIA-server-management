@@ -66,7 +66,8 @@ def extract_job_info():
     userid_pattern = re.compile(r'UserId=([\w\d]+)')
     priority_pattern = re.compile(r"Priority=(\d+)")
     jobstate_pattern = re.compile(r"JobState=([A-Z_]+)")
-    nodelist_pattern = re.compile(r'NodeList=([^\s]+)')
+    nodelist_pattern = re.compile(r'\bNodeList=([^\s]+)')
+    reqnodelist_pattern = re.compile(r'ReqNodeList=([^\s]+)')
     partition_pattern = re.compile(r"Partition=([^\s]+)")
     reqtres_pattern = re.compile(
         r"ReqTRES=cpu=(\d+),mem=(\d+(?:\.\d+)?)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?"
@@ -86,6 +87,7 @@ def extract_job_info():
         priority_match = priority_pattern.search(job)
         jobstate_match = jobstate_pattern.search(job)
         nodelist_match = nodelist_pattern.search(job)
+        reqnodelist_match = reqnodelist_pattern.search(job)
         partition_match = partition_pattern.search(job)
         reqtres_match = reqtres_pattern.search(job)
         alloctres_match = alloctres_pattern.search(job)
@@ -104,6 +106,9 @@ def extract_job_info():
         jobstate = jobstate_match.group(1)
         nodelist = nodelist_match.group(1) if nodelist_match else ""
         nodelist = expand_nodelist(nodelist)
+        reqnodelist = reqnodelist_match.group(1) if reqnodelist_match else ""
+        reqnodelist = expand_nodelist(reqnodelist)
+        nodelist = nodelist if nodelist else reqnodelist
         partition = partition_match.group(1).split(",")
         if alloctres_match:
             tres_match = alloctres_match
