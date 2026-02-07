@@ -881,7 +881,7 @@ def render_running_job_on_each_node(stdscr, savai_result, start_y, jobs_by_node)
     nodelist = [res['nodename'] for res in savai_result]
     multi_node_job_color_map = {}
     multi_node_job_counter = 0
-    multi_node_job_color_list = (3, 4, 5, 6, 7)
+    multi_node_job_color_list = (3, 6, 7, 4, 5)
 
     for idx, node in enumerate(nodelist):
         if start_x + idx >= height:
