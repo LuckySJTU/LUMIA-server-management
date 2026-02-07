@@ -22,7 +22,7 @@ import traceback
 #     print("Please: pip install psutil", file=sys.stderr)
 #     sys.exit(1)
 
-VERSION = 'v3.0.1m'
+VERSION = 'v3.0.2m'
 
 # -----------------------------
 # 并行采集框架：DataBus + 周期采集 + 子进程超时
@@ -881,7 +881,7 @@ def render_running_job_on_each_node(stdscr, savai_result, start_y, jobs_by_node)
     nodelist = [res['nodename'] for res in savai_result]
     multi_node_job_color_map = {}
     multi_node_job_counter = 0
-    multi_node_job_color_list = (3, 6, 7)
+    multi_node_job_color_list = (3, 4, 5, 6, 7)
 
     for idx, node in enumerate(nodelist):
         if start_x + idx >= height:
