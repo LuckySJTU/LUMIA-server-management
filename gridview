@@ -775,8 +775,13 @@ def collect_running_jobs_on_nodes(nodelist):
             parts = line.split()
             if len(parts) >= 3:
                 if '[' in parts[2]:
-                    nodes = parts[2][2:-1]
-                    nodes = ['g'+nodes[i:i+4] for i in range(0, len(nodes), 5)]
+                    command = f"scontrol show hostname {parts[2]}"
+                    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    stdout, _ = process.communicate()
+                    if process.returncode != 0:
+                        nodes = []
+                    else:
+                        nodes = stdout.decode('utf-8').strip().split('\n')
                 else:
                     nodes = [parts[2]]
                 for node in nodes:
@@ -1064,7 +1069,7 @@ def gridview(stdscr):
     manager.add("storage", collect_storage_usage, interval_s=60.0, timeout_s=5.0)     # NFS 慢：给更短 timeout
     manager.add("job_table", JobTableFn(), interval_s=1.0, timeout_s=2.0)
     # manager.add_thread_only("net_speed", net_fn, interval_s=1.0)
-    manager.add("running_jobs", RunningJobsFn(), interval_s=1.0, timeout_s=3.0)      # 每节点 squeue：可能慢
+    manager.add("running_jobs", RunningJobsFn(), interval_s=5.0, timeout_s=10.0)      # 每节点 squeue：可能慢
     # manager.add("kill_overload", collect_kill_overload_and_log, interval_s=3.0, timeout_s=5.0)
 
     manager.start_all()
