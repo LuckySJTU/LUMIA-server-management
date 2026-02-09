@@ -22,7 +22,7 @@ except ImportError:
     print("Please: pip install psutil", file=sys.stderr)
     sys.exit(1)
 
-VERSION = 'v3.0.1'
+VERSION = 'v3.0.2'
 
 # -----------------------------
 # 并行采集框架：DataBus + 周期采集 + 子进程超时
@@ -763,7 +763,7 @@ def collect_running_jobs_on_nodes(nodelist):
     """
     # 注意：state 不在这里取，渲染时用 savai 的 state；这里只采 job 列表
     out = {node:[] for node in nodelist}
-    command = "squeue --sort=i --Format=JobID,PriorityLong,NodeList"
+    command = "squeue --sort=i --Format=JobID,PriorityLong,NodeList:50"
     process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, _ = process.communicate()
     if process.returncode != 0:
@@ -775,7 +775,13 @@ def collect_running_jobs_on_nodes(nodelist):
             parts = line.split()
             if len(parts) >= 3:
                 if '[' in parts[2]:
-                    nodes = ['node'+x for x in parts[2][5:-1].split(',')]
+                    command = f"scontrol show hostname {parts[2]}"
+                    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    stdout, _ = process.communicate()
+                    if process.returncode != 0:
+                        nodes = []
+                    else:
+                        nodes = stdout.decode('utf-8').strip().split('\n')
                 else:
                     nodes = [parts[2]]
                 for node in nodes:
