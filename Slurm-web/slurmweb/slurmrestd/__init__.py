@@ -213,6 +213,56 @@ class Slurmrestd:
             f"/slurmdb/v{self.api_version}/job/{job_id}", "jobs", **kwargs
         )[0]
 
+    @staticmethod
+    def _extract_batch_script(output: str) -> t.Optional[str]:
+        """Extract useful batch script content from sacct --batch-script output."""
+        lines = output.splitlines()
+
+        # Prefer script body from shebang line.
+        for n, line in enumerate(lines):
+            if line.lstrip().startswith("#!"):
+                script = "\n".join(lines[n:]).strip()
+                if len(script):
+                    return script
+                return None
+
+        # Fallback: extract text after delimiter line.
+        for n, line in enumerate(lines):
+            stripped = line.strip()
+            if len(stripped) >= 3 and set(stripped) == {"-"}:
+                script = "\n".join(lines[n + 1 :]).strip()
+                if len(script):
+                    return script
+                return None
+
+        script = output.strip()
+        if len(script):
+            return script
+        return None
+
+    def _acct_batch_script(self, job_id: int) -> t.Optional[str]:
+        """Retrieve submitted batch script with sacct and extract script body."""
+        try:
+            result = subprocess.run(
+                ["sacct", "-j", str(job_id), "--batch-script"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except FileNotFoundError:
+            logger.debug("Unable to retrieve batch script with sacct: command not found")
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning("Unable to retrieve batch script with sacct: command timed out")
+            return None
+        except subprocess.CalledProcessError as err:
+            detail = err.stderr.strip() if err.stderr else str(err)
+            logger.warning("Unable to retrieve batch script with sacct: %s", detail)
+            return None
+
+        return self._extract_batch_script(result.stdout)
+
     def nodes(self, **kwargs):
         return self._request(f"/slurm/v{self.api_version}/nodes", "nodes", **kwargs)
 
@@ -638,6 +688,13 @@ class SlurmrestdFiltered(Slurmrestd):
             if err.error != 2017:
                 raise err
             # pass the error, the job is just not available in ctld queue
+
+        # Prefer explicit batch script content from slurm accounting command when
+        # available.
+        batch_script = self._acct_batch_script(job_id)
+        if batch_script is not None:
+            result["script"] = batch_script
+
         return result
 
     def nodes(self):

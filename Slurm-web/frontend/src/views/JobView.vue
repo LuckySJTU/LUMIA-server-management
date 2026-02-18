@@ -138,7 +138,12 @@ const jobFieldsContent = computed(
         id: 'script',
         label: 'Script',
         component: JobFieldRaw,
-        props: { field: data.value.script }
+        props: {
+          field: data.value.script === 'NONE' ? '' : data.value.script,
+          monospace: true,
+          preserveLines: true,
+          scrollable: true
+        }
       },
       {
         id: 'workdir',

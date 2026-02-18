@@ -300,7 +300,17 @@ onMounted(() => {
 
         <div class="border-gray-200 pb-4">
           <div class="mx-auto flex items-center justify-between px-4 sm:px-6 lg:px-8">
-            <JobsSorter @sort="sortJobs" />
+            <div class="flex items-center gap-3">
+              <JobsSorter @sort="sortJobs" />
+              <button
+                type="button"
+                class="bg-slurmweb dark:bg-slurmweb-verydark hover:bg-slurmweb-darker focus-visible:outline-slurmweb inline-flex items-center gap-x-1.5 rounded-md px-3 py-2 text-sm font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2"
+                @click="runtimeStore.jobs.openFiltersPanel = true"
+              >
+                <PlusSmallIcon class="-ml-0.5 h-5 w-5" aria-hidden="true" />
+                Add filters
+              </button>
+            </div>
 
             <div class="flex items-center gap-3">
               <button
@@ -311,14 +321,6 @@ onMounted(() => {
               >
                 <PaperAirplaneIcon class="-ml-0.5 h-5 w-5" aria-hidden="true" />
                 Submit New Job
-              </button>
-              <button
-                type="button"
-                class="bg-slurmweb dark:bg-slurmweb-verydark hover:bg-slurmweb-darker focus-visible:outline-slurmweb inline-flex items-center gap-x-1.5 rounded-md px-3 py-2 text-sm font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2"
-                @click="runtimeStore.jobs.openFiltersPanel = true"
-              >
-                <PlusSmallIcon class="-ml-0.5 h-5 w-5" aria-hidden="true" />
-                Add filters
               </button>
             </div>
           </div>
@@ -347,6 +349,7 @@ onMounted(() => {
               <thead>
                 <tr class="text-sm font-semibold text-gray-900 dark:text-gray-200">
                   <th scope="col" class="w-12 py-3.5 pr-3 text-left sm:pl-6 lg:pl-8">#ID</th>
+                  <th scope="col" class="px-3 py-3.5 text-left">Job Name</th>
                   <th scope="col" class="w-16 px-3 py-3.5 text-left">State</th>
                   <th scope="col" class="px-3 py-3.5 text-left">User (account)</th>
                   <th scope="col" class="hidden px-3 py-3.5 text-left sm:table-cell">Resources</th>
@@ -372,6 +375,9 @@ onMounted(() => {
                     class="py-4 pr-3 font-medium whitespace-nowrap text-gray-900 sm:pl-6 lg:pl-8 dark:text-gray-100"
                   >
                     {{ job.job_id }}
+                  </td>
+                  <td class="max-w-[240px] px-3 py-4 whitespace-nowrap">
+                    <span class="block truncate">{{ job.name || '-' }}</span>
                   </td>
                   <td class="px-3 py-4 whitespace-nowrap">
                     <JobStatusBadge :status="job.job_state" />

@@ -62,6 +62,15 @@ describe('compareClusterJobSorter', () => {
     expect(compareClusterJobSortOrder(jobA, jobB, 'user', 'asc')).toBe(-1)
     expect(compareClusterJobSortOrder(jobA, jobB, 'user', 'desc')).toBe(1)
   })
+  test('compare sort by name', () => {
+    const jobA = { ...jobs[1] }
+    const jobB = { ...jobs[1] }
+    jobA.name = 'alpha'
+    jobB.name = 'beta'
+    // A < B
+    expect(compareClusterJobSortOrder(jobA, jobB, 'name', 'asc')).toBe(-1)
+    expect(compareClusterJobSortOrder(jobA, jobB, 'name', 'desc')).toBe(1)
+  })
   test('compare sort by state', () => {
     const jobA = { ...jobs[1] }
     const jobB = { ...jobs[1] }

@@ -156,6 +156,7 @@ filters:
     - cpus
     - gres_detail
     - job_id
+    - name
     - job_state
     - node_count
     - nodes
@@ -165,6 +166,8 @@ filters:
     - sockets_per_node
     - state_reason
     - tasks
+    - tres_alloc_str
+    - tres_req_str
     - tres_per_job
     - tres_per_node
     - tres_per_socket

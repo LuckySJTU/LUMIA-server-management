@@ -16,6 +16,7 @@ const runtimeStore = useRuntimeStore()
 
 const sortOptions = [
   { name: '#ID', type: 'id' },
+  { name: 'Job Name', type: 'name' },
   { name: 'State', type: 'state' },
   { name: 'User', type: 'user' },
   { name: 'Priority', type: 'priority' },

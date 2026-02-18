@@ -35,7 +35,7 @@ export interface JobsQueryParameters {
 
 const JobSortOrders = ['asc', 'desc'] as const
 export type JobSortOrder = (typeof JobSortOrders)[number]
-const JobSortCriteria = ['id', 'user', 'state', 'priority', 'resources'] as const
+const JobSortCriteria = ['id', 'name', 'user', 'state', 'priority', 'resources'] as const
 export type JobSortCriterion = (typeof JobSortCriteria)[number]
 
 export const useJobsRuntimeStore = defineStore('jobsRuntime', () => {

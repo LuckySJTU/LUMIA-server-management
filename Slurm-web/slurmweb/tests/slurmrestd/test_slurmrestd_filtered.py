@@ -86,6 +86,22 @@ class TestSlurmrestdFiltered(TestSlurmrestdBase):
         self.assertEqual(job["time"]["elapsed"], 8)
         self.assertEqual(job["time"]["limit"]["number"], 20)
 
+    def test_extract_batch_script_from_sacct_output(self):
+        output = (
+            "Batch Script for 41677\n"
+            "--------------------------------------------------------------------------------\n"
+            "#!/bin/bash\n"
+            "source /home/yxwang/anaconda/etc/profile.d/conda.sh\n"
+            'echo "hello world"\n'
+        )
+        script = Slurmrestd._extract_batch_script(output)
+        self.assertEqual(
+            script,
+            "#!/bin/bash\n"
+            "source /home/yxwang/anaconda/etc/profile.d/conda.sh\n"
+            'echo "hello world"',
+        )
+
     @all_slurm_versions
     def test_nodes(self, slurm_version):
         [asset] = self.mock_slurmrestd_responses(

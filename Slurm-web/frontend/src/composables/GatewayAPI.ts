@@ -69,6 +69,7 @@ export interface ClusterJob {
   account: string
   cpus: ClusterOptionalNumber
   gres_detail: string[]
+  name?: string
   job_id: number
   job_state: string[]
   node_count: ClusterOptionalNumber
@@ -83,6 +84,8 @@ export interface ClusterJob {
   tres_per_node: string
   tres_per_socket: string
   tres_per_task: string
+  tres_alloc_str?: string
+  tres_req_str?: string
   user_name: string
 }
 
@@ -269,7 +272,17 @@ export function compareClusterJobSortOrder(
   sort: JobSortCriterion,
   order: JobSortOrder
 ): number {
-  if (sort == 'user') {
+  if (sort == 'name') {
+    const aName = a.name || ''
+    const bName = b.name || ''
+    if (aName > bName) {
+      return order == 'asc' ? 1 : -1
+    }
+    if (aName < bName) {
+      return order == 'asc' ? -1 : 1
+    }
+    return 0
+  } else if (sort == 'user') {
     if (a.user_name > b.user_name) {
       return order == 'asc' ? 1 : -1
     }

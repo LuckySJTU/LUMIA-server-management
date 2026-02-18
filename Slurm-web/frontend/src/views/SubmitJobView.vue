@@ -29,9 +29,10 @@ const jobNameRef = ref<HTMLInputElement | null>(null)
 const scriptRef = ref<HTMLTextAreaElement | null>(null)
 
 const usernameForPath = computed(() => authStore.username ?? 'username')
+const defaultScriptText = ref(defaultScript(usernameForPath.value))
 
 function defaultScript(username: string) {
-  return `#!/bin/bash\nsource /home/${username}/anaconda/etc/profile.d/conda.sh`
+  return `#!/bin/bash\nsource /home/${username}/anaconda/etc/profile.d/conda.sh\n`
 }
 
 const form = reactive({
@@ -41,10 +42,23 @@ const form = reactive({
   gpus_per_node: 0,
   cpus_per_task: 4,
   memory_per_node: 16,
-  script: '',
+  script: defaultScriptText.value,
   standard_output: '',
   standard_error: ''
 })
+
+watch(
+  () => usernameForPath.value,
+  (newUsername) => {
+    const newDefault = defaultScript(newUsername)
+    // Keep default script in sync with user identity, but do not overwrite
+    // script content if user has started editing it.
+    if (!form.script.trim() || form.script === defaultScriptText.value) {
+      form.script = newDefault
+    }
+    defaultScriptText.value = newDefault
+  }
+)
 
 watch(
   () => form.gpus_per_node,
@@ -153,7 +167,9 @@ function backToJobs() {
 
       <div class="mt-6 grid gap-6 max-w-3xl">
         <div>
-          <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">Job name</label>
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-200"
+            >Job name <span class="text-red-600">*</span></label
+          >
           <input
             v-model="form.job_name"
             type="text"
@@ -164,7 +180,9 @@ function backToJobs() {
         </div>
 
         <div>
-          <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">QoS</label>
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-200"
+            >QoS <span class="text-red-600">*</span></label
+          >
           <input
             v-model="form.qos"
             list="qos-options"
@@ -179,7 +197,9 @@ function backToJobs() {
         </div>
 
         <div>
-          <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">Partition</label>
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-200"
+            >Partition <span class="text-red-600">*</span></label
+          >
           <select
             v-model="form.partition"
             class="mt-2 w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-slurmweb focus:ring-slurmweb dark:border-slate-600 dark:bg-slate-900 dark:text-gray-100"
@@ -196,7 +216,7 @@ function backToJobs() {
 
         <div>
           <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">
-            GPU count
+            GPU count <span class="text-red-600">*</span>
           </label>
           <input
             v-model.number="form.gpus_per_node"
@@ -209,7 +229,7 @@ function backToJobs() {
 
         <div>
           <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">
-            CPUs per task
+            CPUs per task <span class="text-red-600">*</span>
           </label>
           <input
             v-model.number="form.cpus_per_task"
@@ -222,7 +242,7 @@ function backToJobs() {
 
         <div>
           <label class="block text-sm font-medium text-gray-700 dark:text-gray-200">
-            Memory per node (GB)
+            Memory per node (GB) <span class="text-red-600">*</span>
           </label>
           <input
             v-model.number="form.memory_per_node"
@@ -235,7 +255,9 @@ function backToJobs() {
 
         <div>
           <div class="flex flex-wrap items-center gap-2">
-            <label class="text-sm font-medium text-gray-700 dark:text-gray-200">Script</label>
+            <label class="text-sm font-medium text-gray-700 dark:text-gray-200"
+              >Script <span class="text-red-600">*</span></label
+            >
             <span class="text-xs text-gray-500 dark:text-gray-400">
               当前代码执行路径是 /home/{{ usernameForPath }}
             </span>
@@ -245,7 +267,6 @@ function backToJobs() {
             rows="6"
             ref="scriptRef"
             class="mt-2 w-full resize-y rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-slurmweb focus:ring-slurmweb dark:border-slate-600 dark:bg-slate-900 dark:text-gray-100"
-            :placeholder="defaultScript(usernameForPath)"
           ></textarea>
         </div>
 
