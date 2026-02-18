@@ -348,6 +348,12 @@ def cancel(cluster: str, job: int):
 
 @check_jwt
 @validate_cluster
+def cancel_all(cluster: str, job: int):
+    return proxy_agent(cluster, f"cancel-all/{job}", request.token)
+
+
+@check_jwt
+@validate_cluster
 def racksdb(cluster: str, query: str):
     return proxy_agent(
         cluster,

@@ -5,8 +5,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import urllib
+from unittest import mock
 
-from slurmweb.slurmrestd import SlurmrestdFiltered
+from slurmweb.slurmrestd import Slurmrestd, SlurmrestdFiltered
 from ..lib.utils import all_slurm_versions
 from ..lib.slurmrestd import TestSlurmrestdBase, basic_authentifier
 
@@ -49,6 +50,41 @@ class TestSlurmrestdFiltered(TestSlurmrestdBase):
         # Check arbitrary key has been filtered out.
         self.assertIn("array_job_id", slurm_asset[0])
         self.assertNotIn("array_job_id", job)
+
+    def test_job_prefers_ctld_active_state_and_time(self):
+        acct_job = {
+            "state": {"current": ["COMPLETED"], "reason": "None"},
+            "time": {
+                "submission": 100,
+                "eligible": 100,
+                "start": 101,
+                "end": 200,
+                "elapsed": 99,
+                "limit": {"set": True, "infinite": False, "number": 10},
+            },
+        }
+        ctld_job = {
+            "job_state": ["RUNNING"],
+            "state_reason": "None",
+            "submit_time": {"set": True, "infinite": False, "number": 300},
+            "eligible_time": {"set": True, "infinite": False, "number": 301},
+            "start_time": {"set": True, "infinite": False, "number": 302},
+            "time_limit": {"set": True, "infinite": False, "number": 20},
+        }
+        self.slurmrestd._acctjob = mock.Mock(return_value=acct_job)
+        with mock.patch.object(Slurmrestd, "_ctldjob", return_value=ctld_job), mock.patch(
+            "slurmweb.slurmrestd.__init__.time.time", return_value=310
+        ):
+            job = self.slurmrestd.job(1)
+
+        self.assertEqual(job["state"]["current"], ["RUNNING"])
+        self.assertEqual(job["state"]["reason"], "None")
+        self.assertEqual(job["time"]["submission"], 300)
+        self.assertEqual(job["time"]["eligible"], 301)
+        self.assertEqual(job["time"]["start"], 302)
+        self.assertEqual(job["time"]["end"], 0)
+        self.assertEqual(job["time"]["elapsed"], 8)
+        self.assertEqual(job["time"]["limit"]["number"], 20)
 
     @all_slurm_versions
     def test_nodes(self, slurm_version):

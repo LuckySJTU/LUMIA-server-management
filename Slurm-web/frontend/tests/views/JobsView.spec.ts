@@ -20,7 +20,8 @@ let router: RouterMock
 describe('JobView.vue', () => {
   beforeEach(() => {
     router = init_plugins()
-    useRuntimeStore().availableClusters = [
+    const runtimeStore = useRuntimeStore()
+    runtimeStore.availableClusters = [
       {
         name: 'foo',
         permissions: { roles: [], actions: [] },
@@ -29,6 +30,7 @@ describe('JobView.vue', () => {
         metrics: true
       }
     ]
+    runtimeStore.currentCluster = runtimeStore.availableClusters[0]
     // Reset mockClusterDataPoller unable to its default value before every tests.
     mockClusterDataPoller.unable.value = false
   })
@@ -58,6 +60,13 @@ describe('JobView.vue', () => {
     // Check lines
     const lines = table.findAll('tbody tr')
     expect(lines.length).toBeGreaterThan(1)
+
+    // Priority column should display available numeric values, not only '-'.
+    const priorities = table
+      .findAll('tbody tr td:nth-child(7)')
+      .map((cell) => cell.text().trim())
+      .filter((value) => value.length > 0)
+    expect(priorities.some((value) => value !== '-')).toBe(true)
   })
   test('show error alert when unable to retrieve jobs', () => {
     mockClusterDataPoller.unable.value = true

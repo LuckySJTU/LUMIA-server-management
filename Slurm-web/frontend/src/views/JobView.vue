@@ -181,18 +181,25 @@ const jobFieldsContent = computed(
 
 const canCancel = computed(() => {
   if (!data.value) return false
-  if (!runtimeStore.hasPermission('cancel-job')) return false
+  const canCancelOwnJob = runtimeStore.hasPermission('cancel-job')
+  const canCancelAllJobs = runtimeStore.hasPermission('cancel-all-job')
+  if (!canCancelOwnJob && !canCancelAllJobs) return false
   const isOwner = authStore.username && data.value.user === authStore.username
   const states = data.value.state.current
   const isActive = states.includes('PENDING') || states.includes('RUNNING')
-  return Boolean(isOwner && isActive)
+  if (!isActive) return false
+  return Boolean((canCancelOwnJob && isOwner) || canCancelAllJobs)
 })
 
 async function cancelJob() {
   cancelError.value = ''
   canceling.value = true
   try {
-    await gatewayAPI.cancel(cluster, id)
+    if (runtimeStore.hasPermission('cancel-all-job')) {
+      await gatewayAPI.cancelAll(cluster, id)
+    } else {
+      await gatewayAPI.cancel(cluster, id)
+    }
     cancelConfirmOpen.value = false
   } catch (error) {
     cancelError.value = error instanceof Error ? error.message : String(error)

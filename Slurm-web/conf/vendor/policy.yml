@@ -23,3 +23,5 @@ actions:
     Submit a job to the cluster.
   cancel-job: |
     Cancel a job in the cluster.
+  cancel-all-job: |
+    Cancel any pending or running job in the cluster.

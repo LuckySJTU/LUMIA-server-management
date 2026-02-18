@@ -840,6 +840,10 @@ export function useGatewayAPI() {
     return await restAPI.del<CancelJobResponse>(`/agents/${cluster}/cancel/${job}`)
   }
 
+  async function cancelAll(cluster: string, job: number): Promise<CancelJobResponse> {
+    return await restAPI.del<CancelJobResponse>(`/agents/${cluster}/cancel-all/${job}`)
+  }
+
   async function job(cluster: string, job: number): Promise<ClusterIndividualJob> {
     return await restAPI.get<ClusterIndividualJob>(`/agents/${cluster}/job/${job}`)
   }
@@ -998,6 +1002,7 @@ export function useGatewayAPI() {
     jobs,
     submit,
     cancel,
+    cancelAll,
     job,
     nodes,
     node,

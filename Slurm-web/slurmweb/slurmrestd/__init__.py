@@ -7,6 +7,7 @@
 import typing as t
 import urllib
 import logging
+import time
 
 import requests
 import ClusterShell
@@ -331,8 +332,7 @@ class Slurmrestd:
     def qos(self: str, **kwargs):
         return self._request(f"/slurmdb/v{self.api_version}/qos", "qos", **kwargs)
 
-    def cancel(self: str, args, **kwargs):
-        user_name, job_id = args
+    def _cancel_job(self, user_name: str, job_id: int):
         try:
             cmd = ["scontrol", "token", f"username={user_name}"]
             result = subprocess.run(cmd, check=True, capture_output=True, text=True)
@@ -374,6 +374,14 @@ class Slurmrestd:
                 "slurmrestd query %s warnings: %s", response.url, result["warnings"]
             )
         return result
+
+    def cancel(self: str, args, **kwargs):
+        user_name, job_id = args
+        return self._cancel_job(user_name, job_id)
+
+    def cancel_all(self: str, args, **kwargs):
+        user_name, job_id = args
+        return self._cancel_job(user_name, job_id)
 
     def myrequests(self: str, args, **kwargs):
         user_name, data = args
@@ -564,13 +572,68 @@ class SlurmrestdFiltered(Slurmrestd):
         )
 
     def job(self, job_id: int):
+        def _optional_time_field(value: t.Any) -> t.Optional[int]:
+            if not isinstance(value, dict):
+                return None
+            if not value.get("set", False) or value.get("infinite", False):
+                return None
+            try:
+                return int(value["number"])
+            except (KeyError, TypeError, ValueError):
+                return None
+
         try:
             result = self._acctjob(job_id)
         except IndexError:
             raise SlurmrestdNotFoundError(f"Job {job_id} not found")
         # try to enrich result with additional fields from slurmctld
         try:
-            result.update(self._ctldjob(job_id, ignore_notfound=True))
+            raw_ctld = super()._ctldjob(job_id, ignore_notfound=True)
+            ctld = SlurmrestdFiltered.filter_fields(
+                dict(raw_ctld), self.filters.ctldjob
+            )
+            result.update(ctld)
+
+            # If job is still active in slurmctld, trust slurmctld state/time for
+            # current execution context over slurmdb historical records.
+            job_state = raw_ctld.get("job_state")
+            if isinstance(job_state, list) and len(job_state):
+                active_states = {"PENDING", "RUNNING", "COMPLETING"}
+                if active_states.intersection(job_state):
+                    if not isinstance(result.get("state"), dict):
+                        result["state"] = {}
+                    result["state"]["current"] = job_state
+                    if "state_reason" in raw_ctld:
+                        result["state"]["reason"] = raw_ctld["state_reason"]
+
+                    if not isinstance(result.get("time"), dict):
+                        result["time"] = {}
+
+                    submission = _optional_time_field(raw_ctld.get("submit_time"))
+                    eligible = _optional_time_field(raw_ctld.get("eligible_time"))
+                    start = _optional_time_field(raw_ctld.get("start_time"))
+
+                    if submission is not None:
+                        result["time"]["submission"] = submission
+                    if eligible is not None:
+                        result["time"]["eligible"] = eligible
+                    elif submission is not None:
+                        result["time"]["eligible"] = submission
+                    if start is not None:
+                        result["time"]["start"] = start
+
+                    # Explicitly clear historical termination timestamps while job is
+                    # active to avoid stale timeline/status on frontend.
+                    result["time"]["end"] = 0
+
+                    # Keep time limit synchronized with slurmctld for active jobs.
+                    if "time_limit" in raw_ctld:
+                        result["time"]["limit"] = raw_ctld["time_limit"]
+
+                    if "RUNNING" in job_state and start is not None:
+                        result["time"]["elapsed"] = max(0, int(time.time()) - start)
+                    elif "PENDING" in job_state:
+                        result["time"]["elapsed"] = 0
         except SlurmrestdInternalError as err:
             if err.error != 2017:
                 raise err

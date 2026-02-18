@@ -135,6 +135,22 @@ class TestAgentPermissions(TestAgentBase):
             },
         )
 
+    def test_action_cancel_all_user_denied(self):
+        # cancel-all endpoint is reserved to dedicated privileged roles.
+        self.setup_client()
+        response = self.client.delete(f"/v{get_version()}/cancel-all/1")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json,
+            {
+                "code": 403,
+                "description": (
+                    "user role is not allowed to perform action cancel-all-job"
+                ),
+                "name": "Forbidden",
+            },
+        )
+
     def test_invalid_token(self):
         self.setup_client()
         self.client.environ_base["HTTP_AUTHORIZATION"] = "Bearer failed"

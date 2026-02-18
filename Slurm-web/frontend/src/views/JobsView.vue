@@ -7,13 +7,14 @@
 -->
 
 <script setup lang="ts">
-import { onMounted, watch, computed } from 'vue'
+import { onMounted, watch, computed, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import type { LocationQueryRaw } from 'vue-router'
 import { useRuntimeStore } from '@/stores/runtime'
+import { useAuthStore } from '@/stores/auth'
 import type { JobSortCriterion, JobSortOrder } from '@/stores/runtime/jobs'
 import { useClusterDataPoller } from '@/composables/DataPoller'
-import { compareClusterJobSortOrder } from '@/composables/GatewayAPI'
+import { compareClusterJobSortOrder, useGatewayAPI } from '@/composables/GatewayAPI'
 import type { ClusterJob } from '@/composables/GatewayAPI'
 import JobsSorter from '@/components/jobs/JobsSorter.vue'
 import JobStatusBadge from '@/components/job/JobStatusBadge.vue'
@@ -26,7 +27,7 @@ import ErrorAlert from '@/components/ErrorAlert.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 
 import { ChevronLeftIcon, ChevronRightIcon } from '@heroicons/vue/20/solid'
-import { PaperAirplaneIcon, PlusSmallIcon, WindowIcon } from '@heroicons/vue/24/outline'
+import { PaperAirplaneIcon, PlusSmallIcon } from '@heroicons/vue/24/outline'
 
 const { cluster } = defineProps<{ cluster: string }>()
 
@@ -67,9 +68,41 @@ const lastjob = computed(() => {
 const router = useRouter()
 
 const runtimeStore = useRuntimeStore()
+const authStore = useAuthStore()
+const gatewayAPI = useGatewayAPI()
+const cancelingJobId = ref<number | null>(null)
+const cancelError = ref('')
+
+function isCancelableJob(job: ClusterJob): boolean {
+  return job.job_state.includes('PENDING') || job.job_state.includes('RUNNING')
+}
+
+function canCancelJob(job: ClusterJob): boolean {
+  if (!isCancelableJob(job)) return false
+  const canCancelOwnJob = runtimeStore.hasPermission('cancel-job')
+  const canCancelAllJobs = runtimeStore.hasPermission('cancel-all-job')
+  if (canCancelAllJobs) return true
+  if (!canCancelOwnJob) return false
+  return authStore.username === job.user_name
+}
+
+async function cancelJob(jobId: number): Promise<void> {
+  cancelError.value = ''
+  cancelingJobId.value = jobId
+  try {
+    if (runtimeStore.hasPermission('cancel-all-job')) {
+      await gatewayAPI.cancelAll(cluster, jobId)
+    } else {
+      await gatewayAPI.cancel(cluster, jobId)
+    }
+  } catch (error) {
+    cancelError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    cancelingJobId.value = null
+  }
+}
 
 function jobPriority(job: ClusterJob): string {
-  if (!job.job_state.includes('PENDING')) return '-'
   if (job.priority.set) {
     if (job.priority.infinite) {
       return '∞'
@@ -294,6 +327,9 @@ onMounted(() => {
       </section>
 
       <div class="mt-8 flow-root">
+        <p v-if="cancelError" class="mb-3 text-sm font-semibold text-red-600">
+          {{ cancelError }}
+        </p>
         <ErrorAlert v-if="unable"
           >Unable to retrieve jobs from cluster
           <span class="font-medium">{{ cluster }}</span></ErrorAlert
@@ -361,12 +397,20 @@ onMounted(() => {
                     </template>
                   </td>
                   <td class="h-full text-right font-medium">
+                    <button
+                      v-if="canCancelJob(job)"
+                      type="button"
+                      class="mr-3 inline-flex items-center rounded-md bg-red-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+                      :disabled="cancelingJobId === job.job_id"
+                      @click="cancelJob(job.job_id)"
+                    >
+                      {{ cancelingJobId === job.job_id ? 'Canceling…' : 'Cancel' }}
+                    </button>
                     <RouterLink
                       :to="{ name: 'job', params: { cluster: cluster, id: job.job_id } }"
-                      class="hover:text-slurmweb-dark hover:dark:text-slurmweb"
+                      class="mr-4 inline-flex items-center rounded-md bg-slate-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-slate-500 lg:mr-6"
                     >
-                      <WindowIcon class="mr-4 inline-block h-5 w-5 lg:mr-6" aria-hidden="true" />
-                      <span class="sr-only">View {{ job.job_id }}</span>
+                      View
                     </RouterLink>
                   </td>
                 </tr>

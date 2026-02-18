@@ -123,6 +123,11 @@ class SlurmwebAppGateway(SlurmwebWebApp, RFLTokenizedWebApp):
         SlurmwebAppRoute("/api/agents/<cluster>/myrequests", views.myrequests, methods=["POST"]),
         SlurmwebAppRoute("/api/agents/<cluster>/submit", views.submit, methods=["POST"]),
         SlurmwebAppRoute("/api/agents/<cluster>/cancel/<int:job>", views.cancel, methods=["DELETE"]),
+        SlurmwebAppRoute(
+            "/api/agents/<cluster>/cancel-all/<int:job>",
+            views.cancel_all,
+            methods=["DELETE"],
+        ),
     }
 
     async def _get_agent_info(self, url) -> SlurmwebAgent:

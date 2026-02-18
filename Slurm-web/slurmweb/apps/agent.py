@@ -57,6 +57,11 @@ class SlurmwebAppAgent(SlurmwebWebApp, RFLTokenizedRBACWebApp):
         SlurmwebAppRoute(f"/v{get_version()}/myrequests", views.myrequests, methods=["POST"]),
         SlurmwebAppRoute(f"/v{get_version()}/submit", views.submit, methods=["POST"]),
         SlurmwebAppRoute(f"/v{get_version()}/cancel/<int:job>", views.cancel, methods=["DELETE"]),
+        SlurmwebAppRoute(
+            f"/v{get_version()}/cancel-all/<int:job>",
+            views.cancel_all,
+            methods=["DELETE"],
+        ),
     }
 
     def __init__(self, seed):

@@ -2,6 +2,7 @@ import { ref, nextTick } from 'vue'
 import { describe, test, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { useRuntimeStore } from '@/stores/runtime'
+import { useAuthStore } from '@/stores/auth'
 import JobView from '@/views/JobView.vue'
 import { init_plugins, getMockClusterDataPoller } from '../lib/common'
 import type { ClusterIndividualJob } from '@/composables/GatewayAPI'
@@ -19,7 +20,8 @@ let router: RouterMock
 describe('JobView.vue', () => {
   beforeEach(() => {
     router = init_plugins()
-    useRuntimeStore().availableClusters = [
+    const runtimeStore = useRuntimeStore()
+    runtimeStore.availableClusters = [
       {
         name: 'foo',
         permissions: { roles: [], actions: [] },
@@ -28,6 +30,7 @@ describe('JobView.vue', () => {
         metrics: true
       }
     ]
+    runtimeStore.currentCluster = runtimeStore.availableClusters[0]
   })
   test('display job details', () => {
     mockClusterDataPoller.data.value = jobRunning
@@ -61,5 +64,35 @@ describe('JobView.vue', () => {
     // #user hash in route while group field is not highlighted.
     expect(wrapper.get('dl div#user').classes('bg-slurmweb-light')).toBe(true)
     expect(wrapper.get('dl div#group').classes('bg-slurmweb-light')).toBe(false)
+  })
+
+  test('show cancel button for admin with cancel-all-job permission', () => {
+    mockClusterDataPoller.data.value = jobRunning
+    useRuntimeStore().currentCluster!.permissions.actions = ['cancel-all-job']
+    useAuthStore().username = 'other-user'
+
+    const wrapper = mount(JobView, {
+      props: {
+        cluster: 'foo',
+        id: 1234
+      }
+    })
+
+    expect(wrapper.text()).toContain('Cancel Job')
+  })
+
+  test('hide cancel button for non-owner without cancel-all-job permission', () => {
+    mockClusterDataPoller.data.value = jobRunning
+    useRuntimeStore().currentCluster!.permissions.actions = ['cancel-job']
+    useAuthStore().username = 'other-user'
+
+    const wrapper = mount(JobView, {
+      props: {
+        cluster: 'foo',
+        id: 1234
+      }
+    })
+
+    expect(wrapper.text()).not.toContain('Cancel Job')
   })
 })

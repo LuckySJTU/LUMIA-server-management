@@ -257,6 +257,12 @@ def cancel(job: int):
     return jsonify(result)
 
 
+@rbac_action("cancel-all-job")
+def cancel_all(job: int):
+    result = slurmrest("cancel_all", (request.user.login, job))
+    return jsonify(result)
+
+
 @check_jwt
 def metrics(metric):
     if current_app.metrics_db is None:
