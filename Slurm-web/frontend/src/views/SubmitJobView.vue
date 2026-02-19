@@ -7,7 +7,7 @@
 -->
 
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import ClusterMainLayout from '@/components/ClusterMainLayout.vue'
 import { useGatewayAPI } from '@/composables/GatewayAPI'
@@ -138,6 +138,21 @@ async function submitJob() {
 function backToJobs() {
   router.push({ name: 'jobs', params: { cluster } })
 }
+
+onMounted(() => {
+  const draft = runtimeStore.consumeSubmitJobDraft(cluster)
+  if (!draft) return
+  gpuTouched.value = true
+  form.job_name = draft.job_name
+  form.qos = draft.qos
+  form.partition = draft.partition
+  form.gpus_per_node = draft.gpus_per_node
+  form.cpus_per_task = draft.cpus_per_task
+  form.memory_per_node = draft.memory_per_node
+  form.script = draft.script
+  form.standard_output = draft.standard_output
+  form.standard_error = draft.standard_error
+})
 </script>
 
 <template>

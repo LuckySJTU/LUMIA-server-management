@@ -15,6 +15,7 @@ import ClusterMainLayout from '@/components/ClusterMainLayout.vue'
 import { useClusterDataPoller } from '@/composables/DataPoller'
 import { jobRequestedGPU, jobAllocatedGPU, useGatewayAPI } from '@/composables/GatewayAPI'
 import type { ClusterIndividualJob } from '@/composables/GatewayAPI'
+import { buildSubmitPayloadFromJob } from '@/composables/jobCopy'
 import JobStatusBadge from '@/components/job/JobStatusBadge.vue'
 import JobProgress from '@/components/job/JobProgress.vue'
 import { useRuntimeStore } from '@/stores/runtime'
@@ -38,6 +39,8 @@ const route = useRoute()
 const cancelConfirmOpen = ref(false)
 const canceling = ref(false)
 const cancelError = ref('')
+const copying = ref(false)
+const copyError = ref('')
 
 function backToJobs() {
   router.push({
@@ -48,22 +51,22 @@ function backToJobs() {
 }
 
 const JobsFields = [
-  'user',
-  'group',
-  'account',
-  'wckeys',
-  'priority',
   'name',
+  'user',
+  'account',
+  'partition',
+  'nodes',
+  'qos',
+  'priority',
   'comments',
+  'workdir',
   'submit-line',
   'script',
-  'workdir',
   'exit-code',
-  'nodes',
-  'partition',
-  'qos',
   'tres-requested',
-  'tres-allocated'
+  'tres-allocated',
+  'outputs',
+  'errors'
 ] as const
 type JobField = (typeof JobsFields)[number]
 
@@ -80,29 +83,38 @@ const { data, unable, loaded, setCluster } = useClusterDataPoller<ClusterIndivid
 
 const displayTags = ref<Record<JobField, { show: boolean; highlight: boolean }>>({
   user: { show: false, highlight: false },
-  group: { show: false, highlight: false },
   account: { show: false, highlight: false },
-  wckeys: { show: false, highlight: false },
-  priority: { show: false, highlight: false },
   name: { show: false, highlight: false },
+  partition: { show: false, highlight: false },
+  nodes: { show: false, highlight: false },
+  qos: { show: false, highlight: false },
+  priority: { show: false, highlight: false },
   comments: { show: false, highlight: false },
+  workdir: { show: false, highlight: false },
   'submit-line': { show: false, highlight: false },
   script: { show: false, highlight: false },
-  workdir: { show: false, highlight: false },
   'exit-code': { show: false, highlight: false },
-  nodes: { show: false, highlight: false },
-  partition: { show: false, highlight: false },
-  qos: { show: false, highlight: false },
+  'tres-requested': { show: false, highlight: false },
   'tres-allocated': { show: false, highlight: false },
-  'tres-requested': { show: false, highlight: false }
+  outputs: { show: false, highlight: false },
+  errors: { show: false, highlight: false }
 })
 
 const jobFieldsContent = computed(
   (): { id: JobField; label: string; component: Component; props: object }[] => {
     if (!data.value) return []
+    const preferredScript = data.value.command || data.value.script
+    const scriptContent =
+      preferredScript && preferredScript !== 'NONE' ? preferredScript : ''
+    const scriptLineCount = scriptContent.length ? scriptContent.split('\n').length : 0
+    const hasScriptContent = scriptContent.trim().length > 0
+    const scriptScrollable = scriptLineCount > 10
+    const showExitCode =
+      !data.value.state.current.includes('PENDING') &&
+      !data.value.state.current.includes('RUNNING')
     return [
+      { id: 'name', label: 'Name', component: JobFieldRaw, props: { field: data.value.name } },
       { id: 'user', label: 'User', component: JobFieldRaw, props: { field: data.value.user } },
-      { id: 'group', label: 'Group', component: JobFieldRaw, props: { field: data.value.group } },
       {
         id: 'account',
         label: 'Account',
@@ -110,40 +122,24 @@ const jobFieldsContent = computed(
         props: { field: data.value.association.account }
       },
       {
-        id: 'wckeys',
-        label: 'Wckeys',
+        id: 'partition',
+        label: 'Partition',
         component: JobFieldRaw,
-        props: { field: data.value.wckey.wckey }
+        props: { field: data.value.partition }
       },
+      { id: 'nodes', label: 'Nodes', component: JobFieldRaw, props: { field: data.value.nodes } },
+      { id: 'qos', label: 'QOS', component: JobFieldRaw, props: { field: data.value.qos } },
       {
         id: 'priority',
         label: 'Priority',
         component: JobFieldRaw,
         props: { field: data.value.priority.number }
       },
-      { id: 'name', label: 'Name', component: JobFieldRaw, props: { field: data.value.name } },
       {
         id: 'comments',
         label: 'Comments',
         component: JobFieldComment,
         props: { comment: data.value.comment }
-      },
-      {
-        id: 'submit-line',
-        label: 'Submit line',
-        component: JobFieldRaw,
-        props: { field: data.value.submit_line, monospace: true }
-      },
-      {
-        id: 'script',
-        label: 'Script',
-        component: JobFieldRaw,
-        props: {
-          field: data.value.script === 'NONE' ? '' : data.value.script,
-          monospace: true,
-          preserveLines: true,
-          scrollable: true
-        }
       },
       {
         id: 'workdir',
@@ -152,19 +148,36 @@ const jobFieldsContent = computed(
         props: { field: data.value.working_directory, monospace: true }
       },
       {
-        id: 'exit-code',
-        label: 'Exit Code',
-        component: JobFieldExitCode,
-        props: { exit_code: data.value.exit_code }
-      },
-      { id: 'nodes', label: 'Nodes', component: JobFieldRaw, props: { field: data.value.nodes } },
-      {
-        id: 'partition',
-        label: 'Partition',
+        id: 'submit-line',
+        label: 'Submit line',
         component: JobFieldRaw,
-        props: { field: data.value.partition }
+        props: { field: data.value.submit_line, monospace: true }
       },
-      { id: 'qos', label: 'QOS', component: JobFieldRaw, props: { field: data.value.qos } },
+      ...(hasScriptContent
+        ? [
+            {
+              id: 'script' as JobField,
+              label: 'Script',
+              component: JobFieldRaw,
+              props: {
+                field: scriptContent,
+                monospace: true,
+                preserveLines: true,
+                scrollable: scriptScrollable
+              }
+            }
+          ]
+        : []),
+      ...(showExitCode
+        ? [
+            {
+              id: 'exit-code' as JobField,
+              label: 'Exit Code',
+              component: JobFieldExitCode,
+              props: { exit_code: data.value.exit_code }
+            }
+          ]
+        : []),
       {
         id: 'tres-requested',
         label: 'Requested',
@@ -179,6 +192,18 @@ const jobFieldsContent = computed(
           tres: data.value.tres.allocated,
           gpu: { count: jobAllocatedGPU(data.value), reliable: true }
         }
+      },
+      {
+        id: 'outputs',
+        label: 'Outputs',
+        component: JobFieldRaw,
+        props: { field: data.value.standard_output === 'NONE' ? '' : data.value.standard_output, monospace: true }
+      },
+      {
+        id: 'errors',
+        label: 'Errors',
+        component: JobFieldRaw,
+        props: { field: data.value.standard_error === 'NONE' ? '' : data.value.standard_error, monospace: true }
       }
     ]
   }
@@ -196,6 +221,15 @@ const canCancel = computed(() => {
   return Boolean((canCancelOwnJob && isOwner) || canCancelAllJobs)
 })
 
+const canCopy = computed(() => {
+  if (!data.value) return false
+  if (!runtimeStore.hasPermission('submit-job')) return false
+  if (data.value.node_count && data.value.node_count.set) {
+    return data.value.node_count.number <= 1
+  }
+  return true
+})
+
 async function cancelJob() {
   cancelError.value = ''
   canceling.value = true
@@ -210,6 +244,20 @@ async function cancelJob() {
     cancelError.value = error instanceof Error ? error.message : String(error)
   } finally {
     canceling.value = false
+  }
+}
+
+async function copyCurrentJob() {
+  if (!data.value) return
+  copyError.value = ''
+  copying.value = true
+  try {
+    runtimeStore.setSubmitJobDraft(cluster, buildSubmitPayloadFromJob(data.value))
+    router.push({ name: 'submit-job', params: { cluster } })
+  } catch (error) {
+    copyError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    copying.value = false
   }
 }
 
@@ -265,17 +313,42 @@ onMounted(() => {
     <div v-else-if="data">
       <div class="flex justify-between">
         <div class="px-4 pb-8 sm:px-0">
-          <h3 class="text-base leading-7 font-semibold text-gray-900 dark:text-gray-100">
-            Job {{ id }}
-          </h3>
-          <p class="mt-1 max-w-2xl text-sm leading-6 text-gray-500 dark:text-gray-300">
-            All job settings
-          </p>
+          <div class="flex items-start gap-6">
+            <div>
+              <h3 class="text-base leading-7 font-semibold text-gray-900 dark:text-gray-100">
+                Job {{ id }}
+              </h3>
+              <p class="mt-1 max-w-2xl text-sm leading-6 text-gray-500 dark:text-gray-300">
+                All job settings
+              </p>
+            </div>
+            <div>
+              <div class="flex items-center gap-3">
+                <JobStatusBadge :status="data.state.current" :large="true" />
+                <span v-if="data.state.reason != 'None'" class="text-gray-900 dark:text-gray-100">{{
+                  data.state.reason
+                }}</span>
+              </div>
+              <p v-if="copyError" class="mt-2 text-sm font-semibold text-red-600 dark:text-red-400">
+                {{ copyError }}
+              </p>
+              <p v-if="cancelError" class="mt-2 text-sm font-semibold text-red-600 dark:text-red-400">
+                {{ cancelError }}
+              </p>
+            </div>
+          </div>
         </div>
         <div class="flex flex-col items-end gap-2">
           <div class="flex items-center gap-3">
-            <JobStatusBadge :status="data.state.current" :large="true" />
-            <span v-if="data.state.reason != 'None'">{{ data.state.reason }}</span>
+            <button
+              v-if="canCopy"
+              type="button"
+              class="inline-flex items-center rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white shadow-xs hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+              :disabled="copying"
+              @click="copyCurrentJob"
+            >
+              {{ copying ? 'Copying…' : 'Copy' }}
+            </button>
             <button
               v-if="canCancel"
               type="button"
@@ -285,9 +358,6 @@ onMounted(() => {
               Cancel Job
             </button>
           </div>
-          <p v-if="cancelError" class="mt-2 text-sm font-semibold text-red-600">
-            {{ cancelError }}
-          </p>
         </div>
       </div>
       <div class="flex flex-wrap">

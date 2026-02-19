@@ -10,7 +10,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { Ref } from 'vue'
 import type { RouteLocation } from 'vue-router'
-import type { ClusterDescription } from '@/composables/GatewayAPI'
+import type { ClusterDescription, SubmitJobRequest } from '@/composables/GatewayAPI'
 import { useDashboardRuntimeStore } from './runtime/dashboard'
 import { useJobsRuntimeStore } from './runtime/jobs'
 import { useResourcesRuntimeStore } from './runtime/resources'
@@ -64,6 +64,8 @@ export const useRuntimeStore = defineStore('runtime', () => {
     JSON.parse(localStorage.getItem('availableClusters') || '[]') as ClusterDescription[]
   )
   const currentCluster: Ref<ClusterDescription | undefined> = ref()
+  const submitJobDraft: Ref<{ cluster: string; payload: SubmitJobRequest } | undefined> =
+    ref(undefined)
 
   function addCluster(cluster: ClusterDescription) {
     availableClusters.value.push(cluster)
@@ -118,6 +120,18 @@ export const useRuntimeStore = defineStore('runtime', () => {
   function reportInfo(message: string) {
     addNotification(new Notification('INFO', message, 5))
   }
+
+  function setSubmitJobDraft(cluster: string, payload: SubmitJobRequest) {
+    submitJobDraft.value = { cluster, payload }
+  }
+
+  function consumeSubmitJobDraft(cluster: string): SubmitJobRequest | undefined {
+    if (!submitJobDraft.value || submitJobDraft.value.cluster !== cluster) return undefined
+    const result = submitJobDraft.value.payload
+    submitJobDraft.value = undefined
+    return result
+  }
+
   return {
     routePath,
     beforeSettingsRoute,
@@ -128,6 +142,7 @@ export const useRuntimeStore = defineStore('runtime', () => {
     notifications,
     availableClusters,
     currentCluster,
+    submitJobDraft,
     addCluster,
     getCluster,
     getAllowedClusters,
@@ -137,6 +152,8 @@ export const useRuntimeStore = defineStore('runtime', () => {
     addNotification,
     removeNotification,
     reportError,
-    reportInfo
+    reportInfo,
+    setSubmitJobDraft,
+    consumeSubmitJobDraft
   }
 })

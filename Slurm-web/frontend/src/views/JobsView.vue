@@ -16,6 +16,7 @@ import type { JobSortCriterion, JobSortOrder } from '@/stores/runtime/jobs'
 import { useClusterDataPoller } from '@/composables/DataPoller'
 import { compareClusterJobSortOrder, useGatewayAPI } from '@/composables/GatewayAPI'
 import type { ClusterJob } from '@/composables/GatewayAPI'
+import { buildSubmitPayloadFromJob } from '@/composables/jobCopy'
 import JobsSorter from '@/components/jobs/JobsSorter.vue'
 import JobStatusBadge from '@/components/job/JobStatusBadge.vue'
 import ClusterMainLayout from '@/components/ClusterMainLayout.vue'
@@ -27,7 +28,13 @@ import ErrorAlert from '@/components/ErrorAlert.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 
 import { ChevronLeftIcon, ChevronRightIcon } from '@heroicons/vue/20/solid'
-import { PaperAirplaneIcon, PlusSmallIcon } from '@heroicons/vue/24/outline'
+import {
+  DocumentDuplicateIcon,
+  EyeIcon,
+  PaperAirplaneIcon,
+  PlusSmallIcon,
+  XMarkIcon
+} from '@heroicons/vue/24/outline'
 
 const { cluster } = defineProps<{ cluster: string }>()
 
@@ -71,7 +78,9 @@ const runtimeStore = useRuntimeStore()
 const authStore = useAuthStore()
 const gatewayAPI = useGatewayAPI()
 const cancelingJobId = ref<number | null>(null)
+const copyingJobId = ref<number | null>(null)
 const cancelError = ref('')
+const copyError = ref('')
 
 function isCancelableJob(job: ClusterJob): boolean {
   return job.job_state.includes('PENDING') || job.job_state.includes('RUNNING')
@@ -84,6 +93,13 @@ function canCancelJob(job: ClusterJob): boolean {
   if (canCancelAllJobs) return true
   if (!canCancelOwnJob) return false
   return authStore.username === job.user_name
+}
+
+function isSingleNodeJob(job: ClusterJob): boolean {
+  if (job.node_count && job.node_count.set) {
+    return job.node_count.number <= 1
+  }
+  return true
 }
 
 async function cancelJob(jobId: number): Promise<void> {
@@ -99,6 +115,20 @@ async function cancelJob(jobId: number): Promise<void> {
     cancelError.value = error instanceof Error ? error.message : String(error)
   } finally {
     cancelingJobId.value = null
+  }
+}
+
+async function copyJob(jobId: number): Promise<void> {
+  copyError.value = ''
+  copyingJobId.value = jobId
+  try {
+    const job = await gatewayAPI.job(cluster, jobId)
+    runtimeStore.setSubmitJobDraft(cluster, buildSubmitPayloadFromJob(job))
+    router.push({ name: 'submit-job', params: { cluster } })
+  } catch (error) {
+    copyError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    copyingJobId.value = null
   }
 }
 
@@ -332,6 +362,9 @@ onMounted(() => {
         <p v-if="cancelError" class="mb-3 text-sm font-semibold text-red-600">
           {{ cancelError }}
         </p>
+        <p v-if="copyError" class="mb-3 text-sm font-semibold text-red-600">
+          {{ copyError }}
+        </p>
         <ErrorAlert v-if="unable"
           >Unable to retrieve jobs from cluster
           <span class="font-medium">{{ cluster }}</span></ErrorAlert
@@ -403,21 +436,35 @@ onMounted(() => {
                     </template>
                   </td>
                   <td class="h-full text-right font-medium">
-                    <button
-                      v-if="canCancelJob(job)"
-                      type="button"
-                      class="mr-3 inline-flex items-center rounded-md bg-red-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
-                      :disabled="cancelingJobId === job.job_id"
-                      @click="cancelJob(job.job_id)"
-                    >
-                      {{ cancelingJobId === job.job_id ? 'Canceling…' : 'Cancel' }}
-                    </button>
-                    <RouterLink
-                      :to="{ name: 'job', params: { cluster: cluster, id: job.job_id } }"
-                      class="mr-4 inline-flex items-center rounded-md bg-slate-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-slate-500 lg:mr-6"
-                    >
-                      View
-                    </RouterLink>
+                    <div class="flex items-center justify-end gap-3 pr-4 lg:pr-6">
+                      <button
+                        v-if="runtimeStore.hasPermission('submit-job') && isSingleNodeJob(job)"
+                        type="button"
+                        class="inline-flex items-center rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        :disabled="copyingJobId === job.job_id"
+                        @click="copyJob(job.job_id)"
+                      >
+                        <DocumentDuplicateIcon class="mr-1 h-3.5 w-3.5" aria-hidden="true" />
+                        {{ copyingJobId === job.job_id ? 'Copying…' : 'Copy' }}
+                      </button>
+                      <button
+                        v-if="canCancelJob(job)"
+                        type="button"
+                        class="inline-flex items-center rounded-md bg-red-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        :disabled="cancelingJobId === job.job_id"
+                        @click="cancelJob(job.job_id)"
+                      >
+                        <XMarkIcon class="mr-1 h-3.5 w-3.5" aria-hidden="true" />
+                        {{ cancelingJobId === job.job_id ? 'Canceling…' : 'Cancel' }}
+                      </button>
+                      <RouterLink
+                        :to="{ name: 'job', params: { cluster: cluster, id: job.job_id } }"
+                        class="inline-flex items-center rounded-md bg-slate-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-slate-500"
+                      >
+                        <EyeIcon class="mr-1 h-3.5 w-3.5" aria-hidden="true" />
+                        View
+                      </RouterLink>
+                    </div>
                   </td>
                 </tr>
               </tbody>
