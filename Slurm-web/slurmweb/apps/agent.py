@@ -33,7 +33,7 @@ from ..errors import SlurmwebConfigurationError
 logger = logging.getLogger(__name__)
 
 # def get_version():
-#     return '26w07a'
+#     return '26w09a'
 
 class SlurmwebAppAgent(SlurmwebWebApp, RFLTokenizedRBACWebApp):
     NAME = "slurm-web-agent"

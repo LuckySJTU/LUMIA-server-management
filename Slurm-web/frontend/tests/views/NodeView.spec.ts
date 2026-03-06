@@ -11,6 +11,7 @@ import jobsNode from '../assets/jobs-node.json'
 import { nextTick } from 'vue'
 
 const mockNodeDataPoller = getMockClusterDataPoller<ClusterNode>()
+const mockNodesDataPoller = getMockClusterDataPoller<ClusterNode[]>()
 const mockJobsDataPoller = getMockClusterDataPoller<ClusterJob[]>()
 
 const useClusterDataPoller = vi.hoisted(() => vi.fn())
@@ -33,8 +34,10 @@ describe('NodeView.vue', () => {
   })
   test('display node details', async () => {
     useClusterDataPoller.mockReturnValueOnce(mockNodeDataPoller)
+    useClusterDataPoller.mockReturnValueOnce(mockNodesDataPoller)
     useClusterDataPoller.mockReturnValueOnce(mockJobsDataPoller)
     mockNodeDataPoller.data.value = nodeAllocated
+    mockNodesDataPoller.data.value = [nodeAllocated]
     mockJobsDataPoller.data.value = jobsNode
     const wrapper = mount(NodeView, {
       props: {

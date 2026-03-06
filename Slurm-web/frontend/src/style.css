@@ -17,6 +17,15 @@
   --color-slurmweb-dark: #486a86;
   --color-slurmweb-verydark: #3b5163;
   --color-slurmweb-font-disabled: #dbe9f4;
+  --color-action-copy: #6e95b2;
+  --color-action-copy-darker: #5b809c;
+  --color-action-copy-dark: #415d72;
+  --color-action-view: #7388a2;
+  --color-action-view-darker: #5f7288;
+  --color-action-view-dark: #435262;
+  --color-action-cancel: #b17e74;
+  --color-action-cancel-darker: #96695f;
+  --color-action-cancel-dark: #6f4b44;
 
   --animate-horizontal-shake: horizontal-shaking 0.35s infinite;
 

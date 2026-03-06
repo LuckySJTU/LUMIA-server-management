@@ -440,7 +440,7 @@ onMounted(() => {
                       <button
                         v-if="runtimeStore.hasPermission('submit-job') && isSingleNodeJob(job)"
                         type="button"
-                        class="inline-flex items-center rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        class="bg-action-copy dark:bg-action-copy-dark hover:bg-action-copy-darker focus-visible:outline-action-copy inline-flex items-center rounded-md px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                         :disabled="copyingJobId === job.job_id"
                         @click="copyJob(job.job_id)"
                       >
@@ -450,7 +450,7 @@ onMounted(() => {
                       <button
                         v-if="canCancelJob(job)"
                         type="button"
-                        class="inline-flex items-center rounded-md bg-red-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        class="bg-action-cancel dark:bg-action-cancel-dark hover:bg-action-cancel-darker focus-visible:outline-action-cancel inline-flex items-center rounded-md px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                         :disabled="cancelingJobId === job.job_id"
                         @click="cancelJob(job.job_id)"
                       >
@@ -459,7 +459,7 @@ onMounted(() => {
                       </button>
                       <RouterLink
                         :to="{ name: 'job', params: { cluster: cluster, id: job.job_id } }"
-                        class="inline-flex items-center rounded-md bg-slate-600 px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-slate-500"
+                        class="bg-action-view dark:bg-action-view-dark hover:bg-action-view-darker focus-visible:outline-action-view inline-flex items-center rounded-md px-2.5 py-1.5 text-xs font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2"
                       >
                         <EyeIcon class="mr-1 h-3.5 w-3.5" aria-hidden="true" />
                         View

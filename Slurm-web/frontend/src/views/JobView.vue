@@ -343,7 +343,7 @@ onMounted(() => {
             <button
               v-if="canCopy"
               type="button"
-              class="inline-flex items-center rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white shadow-xs hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+              class="bg-action-copy dark:bg-action-copy-dark hover:bg-action-copy-darker focus-visible:outline-action-copy inline-flex items-center rounded-md px-3 py-2 text-sm font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
               :disabled="copying"
               @click="copyCurrentJob"
             >
@@ -352,7 +352,7 @@ onMounted(() => {
             <button
               v-if="canCancel"
               type="button"
-              class="inline-flex items-center rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-xs hover:bg-red-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:cursor-not-allowed disabled:opacity-60"
+              class="bg-action-cancel dark:bg-action-cancel-dark hover:bg-action-cancel-darker focus-visible:outline-action-cancel inline-flex items-center rounded-md px-3 py-2 text-sm font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
               @click="cancelConfirmOpen = true"
             >
               Cancel Job
@@ -420,7 +420,7 @@ onMounted(() => {
           </button>
           <button
             type="button"
-            class="rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-xs hover:bg-red-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:cursor-not-allowed disabled:opacity-60"
+            class="bg-action-cancel dark:bg-action-cancel-dark hover:bg-action-cancel-darker focus-visible:outline-action-cancel rounded-md px-3 py-2 text-sm font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
             :disabled="canceling"
             @click="cancelJob"
           >

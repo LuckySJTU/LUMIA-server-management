@@ -15,7 +15,7 @@ import ClusterMainLayout from '@/components/ClusterMainLayout.vue'
 import { useClusterDataPoller } from '@/composables/DataPoller'
 import type { ClusterDataPoller } from '@/composables/DataPoller'
 import { getMBHumanUnit, getNodeGPU, getNodeGPUFromGres } from '@/composables/GatewayAPI'
-import type { ClusterIndividualNode, ClusterJob } from '@/composables/GatewayAPI'
+import type { ClusterIndividualNode, ClusterJob, ClusterNode } from '@/composables/GatewayAPI'
 import NodeMainState from '@/components/resources/NodeMainState.vue'
 import NodeAllocationState from '@/components/resources/NodeAllocationState.vue'
 import JobStatusBadge from '@/components/job/JobStatusBadge.vue'
@@ -37,6 +37,7 @@ function backToResources() {
 }
 
 const node = useClusterDataPoller<ClusterIndividualNode>(cluster, 'node', 5000, nodeName)
+const nodes = useClusterDataPoller<ClusterNode[]>(cluster, 'nodes', 10000)
 
 /* Poll jobs on current nodes if user has permission on view-jobs action. */
 let jobs: ClusterDataPoller<ClusterJob[]> | undefined
@@ -57,10 +58,22 @@ const gpuAllocated = computed(() => {
   )
 })
 
+const displayPartitions = computed(() => {
+  const nodeFromList = nodes.data.value?.find((currentNode) => currentNode.name === nodeName)
+  if (nodeFromList?.partitions?.length) {
+    return nodeFromList.partitions
+  }
+  return node.data.value?.partitions ?? []
+})
+
 watch(
   () => cluster,
   (new_cluster) => {
     node.setCluster(new_cluster)
+    nodes.setCluster(new_cluster)
+    if (jobs) {
+      jobs.setCluster(new_cluster)
+    }
   }
 )
 </script>
@@ -235,7 +248,7 @@ watch(
                 </dt>
                 <dd class="mt-1 text-sm leading-6 sm:col-span-2 sm:mt-0">
                   <span
-                    v-for="partition in node.data.value.partitions"
+                    v-for="partition in displayPartitions"
                     :key="partition"
                     class="rounded-sm bg-gray-500 px-2 py-1 font-medium text-white"
                     >{{ partition }}</span
