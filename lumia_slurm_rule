@@ -32,7 +32,7 @@ def extract_job_info():
     jobstate_pattern = re.compile(r'JobState=([\w]+)')
     nodelist_pattern = re.compile(r'NodeList=([\w\d]+)')
     partition_pattern = re.compile(r'Partition=([\w,]+)')
-    tres_pattern = re.compile(r'TRES=cpu=(\d+),mem=(\d+)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?')
+    tres_pattern = re.compile(r'TRES=cpu=(\d+),mem=(\d+(?:\.\d+)?)([MG]),node=(\d+),billing=(\d+)(?:,gres/gpu=(\d+))?')
     req_exc_node_pattern = re.compile(r'ReqNodeList=([\w\d]+) ExcNodeList=([\w\d]+)')
     reason_pattern = re.compile(r'Reason=([\w,]+)')
 
@@ -56,7 +56,7 @@ def extract_job_info():
             nodelist = nodelist_match.group(1) if nodelist_match else ''
             partition = partition_match.group(1).split(',')
             cpu = int(tres_match.group(1))
-            mem = int(tres_match.group(2)) * (1024 if tres_match.group(3) == 'G' else 1)
+            mem = int(float(tres_match.group(2))) * (1024 if tres_match.group(3) == "G" else 1)
             gpu = int(tres_match.group(6)) if tres_match.group(6) else 0
             reqnodelist = req_exc_node_match.group(1).split(',') if req_exc_node_match else None
             excnodelist = req_exc_node_match.group(2).split(',') if req_exc_node_match else None
