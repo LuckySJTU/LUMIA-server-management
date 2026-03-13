@@ -221,6 +221,20 @@ class NodeStore:
         )
         return cursor.fetchall()
 
+    def touch_running_mappings(self, mapping_ids: list[int]) -> None:
+        if not mapping_ids:
+            return
+        placeholders = ",".join("?" for _ in mapping_ids)
+        self.connection.execute(
+            f"""
+            UPDATE active_mappings
+            SET last_seen_time = ?
+            WHERE id IN ({placeholders})
+            """,
+            [utcnow().isoformat(), *mapping_ids],
+        )
+        self.connection.commit()
+
     def enqueue_samples(self, samples: list[dict[str, Any]]) -> None:
         self.connection.executemany(
             """
@@ -275,17 +289,17 @@ class NodeStore:
         self.connection.commit()
 
     def purge_delivered_and_stale_queue(self) -> None:
-        cutoff = (utcnow() - timedelta(hours=2)).isoformat()
+        cutoff = (utcnow() - timedelta(hours=self.config.undelivered_retention_hours)).isoformat()
         self.connection.execute("DELETE FROM sample_queue WHERE delivered = 1")
         self.connection.execute(
             """
             DELETE FROM sample_queue
             WHERE delivered = 0 AND ts < ?
               AND id NOT IN (
-                  SELECT id FROM sample_queue WHERE delivered = 0 ORDER BY ts DESC LIMIT 10000
+                  SELECT id FROM sample_queue WHERE delivered = 0 ORDER BY ts DESC LIMIT ?
               )
             """,
-            (cutoff,),
+            (cutoff, self.config.undelivered_max_records),
         )
         self.connection.commit()
 
@@ -419,6 +433,7 @@ def capture_samples(config: NodeConfig, store: NodeStore, provider: NVMLProvider
     mappings = store.get_running_mappings()
     by_uuid: dict[str, dict[str, Any] | None] = {}
     samples: list[dict[str, Any]] = []
+    sampled_mapping_ids: list[int] = []
     sample_time = utcnow().replace(second=0, microsecond=0).isoformat()
     for mapping in mappings:
         gpu_uuid = mapping["gpu_uuid"]
@@ -427,6 +442,7 @@ def capture_samples(config: NodeConfig, store: NodeStore, provider: NVMLProvider
         gpu_sample = by_uuid[gpu_uuid]
         if gpu_sample is None:
             continue
+        sampled_mapping_ids.append(int(mapping["id"]))
         samples.append(
             {
                 "ts": sample_time,
@@ -441,6 +457,7 @@ def capture_samples(config: NodeConfig, store: NodeStore, provider: NVMLProvider
         )
     if samples:
         store.enqueue_samples(samples)
+        store.touch_running_mappings(sampled_mapping_ids)
     return len(samples)
 
 
@@ -517,9 +534,9 @@ def run_agent(config: NodeConfig) -> None:
             event_count = process_task_events(config, store)
             if event_count:
                 LOGGER.info("processed %s task events", event_count)
-            store.cleanup_stale_mappings(config.mapping_stale_minutes)
             sample_count = capture_samples(config, store, provider)
             LOGGER.info("captured %s samples", sample_count)
+            store.cleanup_stale_mappings(config.mapping_stale_minutes)
             if started - last_flush >= config.flush_interval_seconds:
                 accepted, rejected = flush_samples(config, store)
                 LOGGER.info("flushed samples accepted=%s rejected=%s", accepted, rejected)

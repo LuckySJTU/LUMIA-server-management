@@ -31,6 +31,8 @@ class NodeConfig:
     request_timeout_seconds: int = int(os.getenv("GPU_MONITOR_REQUEST_TIMEOUT_SECONDS", "15"))
     heartbeat_interval_seconds: int = int(os.getenv("GPU_MONITOR_HEARTBEAT_INTERVAL_SECONDS", "300"))
     task_event_dir: Path = Path(os.getenv("GPU_MONITOR_TASK_EVENT_DIR", "/tmp"))
+    undelivered_retention_hours: int = int(os.getenv("GPU_MONITOR_UNDELIVERED_RETENTION_HOURS", "24"))
+    undelivered_max_records: int = int(os.getenv("GPU_MONITOR_UNDELIVERED_MAX_RECORDS", "100000"))
 
 
 @dataclass(slots=True)

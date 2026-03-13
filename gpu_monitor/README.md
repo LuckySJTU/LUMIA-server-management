@@ -31,6 +31,7 @@
 - 基于 `TaskProlog/TaskEpilog` + 节点 agent 事件消费维护 job-user-node-gpu 映射
 - 节点端每分钟采集活跃 GPU 的 `gpu_util_percent` / `mem_used_bytes` / `mem_total_bytes` / `mem_util_percent`
 - 节点端用 SQLite WAL 做本地缓存，控制节点不可达时保留最近 2 小时未送达样本
+  - 当前默认已调整为保留最近 24 小时未送达样本
 - 节点端每 5 分钟批量上报 `/api/v1/ingest/metrics`
 - 控制节点提供以下 API：
   - `POST /api/v1/ingest/metrics`
@@ -149,7 +150,24 @@ export GPU_MONITOR_API_BASE_URL="http://<汇总节点IP>:8000"
 export GPU_MONITOR_SAMPLE_INTERVAL_SECONDS="60"
 export GPU_MONITOR_FLUSH_INTERVAL_SECONDS="300"
 export GPU_MONITOR_HEARTBEAT_INTERVAL_SECONDS="300"
+export GPU_MONITOR_MAPPING_STALE_MINUTES="10"
+export GPU_MONITOR_UNDELIVERED_RETENTION_HOURS="24"
+export GPU_MONITOR_UNDELIVERED_MAX_RECORDS="100000"
 ```
+
+说明：
+
+- `GPU_MONITOR_MAPPING_STALE_MINUTES` 用于兜底清理异常残留映射
+- 正常运行中的任务会在每轮采样时自动刷新 `last_seen_time`
+- 如果 agent 挂掉、任务异常结束或事件丢失，超过该时间的映射会被自动标记为 `CLOSED`
+- `GPU_MONITOR_UNDELIVERED_RETENTION_HOURS` 控制控制节点不可达时，本地未上报样本的最长保留时间
+- `GPU_MONITOR_UNDELIVERED_MAX_RECORDS` 控制本地未上报队列的上限
+
+重启影响说明：
+
+- `gpu-monitor-api` 重启：分钟数据、小时聚合和告警都在数据库中，短时重启不会丢历史数据；计算节点会继续把样本缓存在本地 SQLite，API 恢复后再补传
+- `gpu-monitor-agent` 重启：本地 `active_mappings` 和 `sample_queue` 都在 SQLite 中，重启后会继续恢复；当前实现会先处理 task 事件并尝试采样，再做 stale 清理，避免把仍在运行的长任务误判为 `CLOSED`
+- 只有当控制节点持续不可达时间超过 `GPU_MONITOR_UNDELIVERED_RETENTION_HOURS`，或未送达样本数超过 `GPU_MONITOR_UNDELIVERED_MAX_RECORDS` 时，才会开始丢弃最旧的未送达数据
 
 ### 2. 启动节点 agent
 
