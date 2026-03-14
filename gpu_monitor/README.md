@@ -367,6 +367,12 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 - 用户最近 1 小时占用 GPU 数 `>= 4` 且平均 GPU 利用率 `< 15`：`warning`
 - 节点最近 1 小时存在至少 2 张低利用率活跃 GPU：`warning`
 
+规则计算说明：
+
+- 时间窗口按分钟桶去重后判断，不按样本条数判断
+- 多卡任务在同一分钟可能产生多条样本，但只计作 1 个分钟桶
+- 平均利用率也按“每分钟先聚合，再对分钟窗口求平均”的方式计算
+
 ## 实现说明与边界
 
 - 节点采集依赖 `pynvml`，底层调用 NVML

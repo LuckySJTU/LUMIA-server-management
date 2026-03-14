@@ -325,6 +325,43 @@ def _resolve_absent_alerts(session: Session, active_keys: set[tuple[str, str, st
             alert.end_time = now
 
 
+def _minute_bucket(ts: datetime) -> datetime:
+    return ts.replace(second=0, microsecond=0)
+
+
+def _group_rows_by_key_and_minute(
+    rows: list[GpuUsageMinute],
+    key_fn: Any,
+) -> dict[str, dict[datetime, list[GpuUsageMinute]]]:
+    grouped: dict[str, dict[datetime, list[GpuUsageMinute]]] = {}
+    for row in rows:
+        key = key_fn(row)
+        grouped.setdefault(key, {}).setdefault(_minute_bucket(row.ts), []).append(row)
+    return grouped
+
+
+def _avg_gpu_by_minute(minute_rows: dict[datetime, list[GpuUsageMinute]]) -> tuple[int, float]:
+    if not minute_rows:
+        return 0, 0.0
+    per_minute = [
+        sum(row.gpu_util_percent for row in rows) / len(rows)
+        for rows in minute_rows.values()
+    ]
+    return len(per_minute), sum(per_minute) / len(per_minute)
+
+
+def _avg_gpu_mem_by_minute(minute_rows: dict[datetime, list[GpuUsageMinute]]) -> tuple[int, float, float]:
+    if not minute_rows:
+        return 0, 0.0, 0.0
+    per_minute_gpu = []
+    per_minute_mem = []
+    for rows in minute_rows.values():
+        per_minute_gpu.append(sum(row.gpu_util_percent for row in rows) / len(rows))
+        per_minute_mem.append(sum(row.mem_util_percent for row in rows) / len(rows))
+    count = len(per_minute_gpu)
+    return count, sum(per_minute_gpu) / count, sum(per_minute_mem) / count
+
+
 def _scan_alerts(session: Session) -> None:
     now = utcnow()
     active_keys: set[tuple[str, str, str]] = set()
@@ -332,22 +369,14 @@ def _scan_alerts(session: Session) -> None:
     rows_2h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=2))).scalars().all()
     rows_1h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=1))).scalars().all()
 
-    job_30m: dict[str, list[GpuUsageMinute]] = {}
-    job_2h: dict[str, list[GpuUsageMinute]] = {}
-    user_1h: dict[str, list[GpuUsageMinute]] = {}
-    node_1h: dict[str, list[GpuUsageMinute]] = {}
-    for row in rows_30m:
-        job_30m.setdefault(row.job_id, []).append(row)
-    for row in rows_2h:
-        job_2h.setdefault(row.job_id, []).append(row)
-    for row in rows_1h:
-        user_1h.setdefault(row.user_name, []).append(row)
-        node_1h.setdefault(row.node_name, []).append(row)
+    job_30m = _group_rows_by_key_and_minute(rows_30m, lambda row: row.job_id)
+    job_2h = _group_rows_by_key_and_minute(rows_2h, lambda row: row.job_id)
+    user_1h = _group_rows_by_key_and_minute(rows_1h, lambda row: row.user_name)
+    node_1h = _group_rows_by_key_and_minute(rows_1h, lambda row: row.node_name)
 
-    for job_id, rows in job_30m.items():
-        if len(rows) >= 30:
-            avg_gpu = sum(row.gpu_util_percent for row in rows) / len(rows)
-            avg_mem = sum(row.mem_util_percent for row in rows) / len(rows)
+    for job_id, minute_rows in job_30m.items():
+        minute_count, avg_gpu, avg_mem = _avg_gpu_mem_by_minute(minute_rows)
+        if minute_count >= 30:
             if avg_gpu < 10:
                 active_keys.add(("job", job_id, "low_util_30m"))
                 _upsert_alert(session, "job", job_id, "warning", "low_util_30m", f"job {job_id} avg gpu util {avg_gpu:.2f}% in 30m")
@@ -355,30 +384,31 @@ def _scan_alerts(session: Session) -> None:
                 active_keys.add(("job", job_id, "high_mem_low_gpu"))
                 _upsert_alert(session, "job", job_id, "warning", "high_mem_low_gpu", f"job {job_id} mem util {avg_mem:.2f}% but gpu util {avg_gpu:.2f}%")
 
-    for job_id, rows in job_2h.items():
-        if len(rows) >= 120:
-            avg_gpu = sum(row.gpu_util_percent for row in rows) / len(rows)
+    for job_id, minute_rows in job_2h.items():
+        minute_count, avg_gpu = _avg_gpu_by_minute(minute_rows)
+        if minute_count >= 120:
             if avg_gpu < 5:
                 active_keys.add(("job", job_id, "low_util_2h"))
                 _upsert_alert(session, "job", job_id, "critical", "low_util_2h", f"job {job_id} avg gpu util {avg_gpu:.2f}% in 2h")
 
-    for user_name, rows in user_1h.items():
-        allocated_gpu_count = len({row.gpu_uuid for row in rows})
-        if len(rows) >= 60 and allocated_gpu_count >= 4:
-            avg_gpu = sum(row.gpu_util_percent for row in rows) / len(rows)
+    for user_name, minute_rows in user_1h.items():
+        all_rows = [row for rows in minute_rows.values() for row in rows]
+        allocated_gpu_count = len({row.gpu_uuid for row in all_rows})
+        minute_count, avg_gpu = _avg_gpu_by_minute(minute_rows)
+        if minute_count >= 60 and allocated_gpu_count >= 4:
             if avg_gpu < 15:
                 active_keys.add(("user", user_name, "user_low_util"))
                 _upsert_alert(session, "user", user_name, "warning", "user_low_util", f"user {user_name} avg gpu util {avg_gpu:.2f}% in 1h")
 
-    for node_name, rows in node_1h.items():
-        if len(rows) >= 60:
-            low_util_gpu_count = len(
-                {
-                    row.gpu_uuid
-                    for row in rows
-                    if row.gpu_util_percent < 10
-                }
-            )
+    for node_name, minute_rows in node_1h.items():
+        minute_count = len(minute_rows)
+        if minute_count >= 60:
+            low_util_gpu_uuids: set[str] = set()
+            for rows in minute_rows.values():
+                for row in rows:
+                    if row.gpu_util_percent < 10:
+                        low_util_gpu_uuids.add(row.gpu_uuid)
+            low_util_gpu_count = len(low_util_gpu_uuids)
             if low_util_gpu_count >= 2:
                 active_keys.add(("node", node_name, "node_low_util"))
                 _upsert_alert(session, "node", node_name, "warning", "node_low_util", f"node {node_name} has {low_util_gpu_count} low-util GPUs in 1h")
