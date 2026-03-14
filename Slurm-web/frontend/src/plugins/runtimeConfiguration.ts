@@ -11,6 +11,7 @@ import { inject } from 'vue'
 
 export interface RuntimeConfiguration {
   api_server: string
+  gpu_monitor_api_server: string
   authentication: boolean
   racksdb_rows_labels: boolean
   racksdb_racks_labels: boolean
@@ -37,6 +38,7 @@ export const initRuntimeConfiguration = async (): Promise<RuntimeConfiguration> 
 
   return {
     api_server: value.API_SERVER,
+    gpu_monitor_api_server: value.GPU_MONITOR_API_SERVER || 'http://localhost:8001',
     authentication: value.AUTHENTICATION,
     racksdb_rows_labels: value.RACKSDB_ROWS_LABELS,
     racksdb_racks_labels: value.RACKSDB_RACKS_LABELS,

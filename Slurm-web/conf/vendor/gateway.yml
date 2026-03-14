@@ -107,7 +107,7 @@ agents:
     - https://cluster2/agent
   version:
     type: str
-    default: 26w09a
+    default: 26w10a
     doc: |
       Minimal support version of Slurm-web agent API
 
@@ -125,6 +125,19 @@ agents:
       you are doing. This parameter is more intented for Slurm-web developers
       rather than end users. Slurm-web is officially tested and validated with
       the default value only.
+
+gpu_monitor:
+  host:
+    type: uri
+    default: http://localhost:8001
+    doc: URL of external GPU monitor API service
+  node_mappings:
+    type: list
+    content: str
+    default:
+    doc: |
+      Optional mappings between Slurm node names and GPU monitor hostnames.
+      Each entry must use the format `<slurm_node_name>=<gpu_monitor_hostname>`.
 authentication:
   enabled:
     type: bool

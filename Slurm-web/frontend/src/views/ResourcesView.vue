@@ -249,7 +249,7 @@ onMounted(() => {
                         />
                       </button>
                     </td>
-                    <td class="py-4 text-sm whitespace-nowrap">
+                    <td class="py-4 pl-2 text-sm whitespace-nowrap sm:pl-3">
                       <RouterLink
                         v-if="node.number == 1"
                         class="inline-flex text-white hover:font-bold hover:text-gray-500 dark:text-gray-900 hover:dark:text-gray-300"

@@ -16,6 +16,8 @@ import type { JobSortCriterion, JobSortOrder } from '@/stores/runtime/jobs'
 import { useClusterDataPoller } from '@/composables/DataPoller'
 import { compareClusterJobSortOrder, useGatewayAPI } from '@/composables/GatewayAPI'
 import type { ClusterJob } from '@/composables/GatewayAPI'
+import { formatGpuPercent, useGpuMonitorAPI, useGpuMonitorPoller } from '@/composables/GpuMonitorAPI'
+import type { GpuMonitorJobsListItem } from '@/composables/GpuMonitorAPI'
 import { buildSubmitPayloadFromJob } from '@/composables/jobCopy'
 import JobsSorter from '@/components/jobs/JobsSorter.vue'
 import JobStatusBadge from '@/components/job/JobStatusBadge.vue'
@@ -77,10 +79,22 @@ const router = useRouter()
 const runtimeStore = useRuntimeStore()
 const authStore = useAuthStore()
 const gatewayAPI = useGatewayAPI()
+const gpuMonitorAPI = useGpuMonitorAPI()
 const cancelingJobId = ref<number | null>(null)
 const copyingJobId = ref<number | null>(null)
 const cancelError = ref('')
 const copyError = ref('')
+const gpuJobs = useGpuMonitorPoller<GpuMonitorJobsListItem[]>(
+  () => gpuMonitorAPI.jobsAll(cluster, 'realtime'),
+  15000
+)
+const gpuJobsById = computed(() => {
+  return new Map((gpuJobs.data.value || []).map((job) => [job.job_id, job]))
+})
+
+function gpuStats(jobId: number): GpuMonitorJobsListItem | undefined {
+  return gpuJobsById.value.get(jobId.toString())
+}
 
 function isCancelableJob(job: ClusterJob): boolean {
   return job.job_state.includes('PENDING') || job.job_state.includes('RUNNING')
@@ -207,6 +221,7 @@ watch(
   () => cluster,
   (new_cluster) => {
     setCluster(new_cluster)
+    gpuJobs.restart()
   }
 )
 
@@ -389,6 +404,9 @@ onMounted(() => {
                   <th scope="col" class="hidden px-3 py-3.5 text-left xl:table-cell">Partition</th>
                   <th scope="col" class="hidden px-3 py-3.5 text-left xl:table-cell">QOS</th>
                   <th scope="col" class="hidden px-3 py-3.5 text-center sm:table-cell">Priority</th>
+                  <th scope="col" class="hidden px-3 py-3.5 text-left 2xl:table-cell">
+                    GPU monitor
+                  </th>
                   <th
                     scope="col"
                     class="hidden px-3 py-3.5 text-left 2xl:table-cell 2xl:min-w-[100px]"
@@ -429,6 +447,15 @@ onMounted(() => {
                   </td>
                   <td class="hidden px-3 py-4 text-center whitespace-nowrap sm:table-cell">
                     {{ jobPriority(job) }}
+                  </td>
+                  <td class="hidden px-3 py-4 whitespace-nowrap 2xl:table-cell">
+                    <template v-if="gpuStats(job.job_id)">
+                      <div class="text-xs text-gray-500 dark:text-gray-400">
+                        GPU {{ formatGpuPercent(gpuStats(job.job_id)?.avg_gpu_util_percent) }}
+                        · MEM {{ formatGpuPercent(gpuStats(job.job_id)?.avg_mem_util_percent) }}
+                      </div>
+                    </template>
+                    <span v-else class="text-gray-400 dark:text-gray-500">-</span>
                   </td>
                   <td class="hidden px-3 py-4 whitespace-nowrap 2xl:table-cell">
                     <template v-if="job.state_reason != 'None'">

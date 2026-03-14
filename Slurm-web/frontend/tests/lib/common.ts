@@ -15,6 +15,7 @@ export function init_plugins(): RouterMock {
       runtimeConfiguration,
       {
         api_server: 'http://localhost',
+        gpu_monitor_api_server: 'http://localhost:8001',
         authentication: true
       }
     ],

@@ -1,7 +1,8 @@
 {
   "API_SERVER": "http://localhost:5012",
+  "GPU_MONITOR_API_SERVER": "http://localhost:8001",
   "AUTHENTICATION": true,
   "RACKSDB_ROWS_LABELS": false,
   "RACKSDB_RACKS_LABELS": false,
-  "VERSION": "26w09a"
+  "VERSION": "26w10a"
 }

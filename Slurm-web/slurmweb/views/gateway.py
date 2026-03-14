@@ -24,6 +24,56 @@ from ..version import get_version
 logger = logging.getLogger(__name__)
 
 
+def gpu_monitor_node_mappings():
+    mappings = {}
+    for item in getattr(current_app.settings.gpu_monitor, "node_mappings", []) or []:
+        if "=" not in item:
+            logger.warning("Invalid gpu_monitor node mapping entry ignored: %s", item)
+            continue
+        slurm_name, monitor_name = item.split("=", 1)
+        mappings[slurm_name.strip()] = monitor_name.strip()
+    return mappings
+
+
+def slurm_node_to_gpu_monitor_hostname(node_name: str) -> str:
+    return gpu_monitor_node_mappings().get(node_name, node_name)
+
+
+def gpu_monitor_hostname_to_slurm_node(node_name: str) -> str:
+    reverse = {monitor: slurm for slurm, monitor in gpu_monitor_node_mappings().items()}
+    return reverse.get(node_name, node_name)
+
+
+def transform_gpu_monitor_response(query: str, data):
+    if query.startswith("nodes/") and isinstance(data, dict):
+        if "node_name" in data:
+            data["node_name"] = gpu_monitor_hostname_to_slurm_node(data["node_name"])
+        return data
+
+    if query == "nodes" and isinstance(data, dict) and "items" in data:
+        for item in data["items"]:
+            if "node_name" in item:
+                item["node_name"] = gpu_monitor_hostname_to_slurm_node(item["node_name"])
+        return data
+
+    if query.startswith("jobs/") and isinstance(data, dict):
+        if "nodes" in data and isinstance(data["nodes"], list):
+            data["nodes"] = [gpu_monitor_hostname_to_slurm_node(node) for node in data["nodes"]]
+        if "series" in data and isinstance(data["series"], list):
+            for point in data["series"]:
+                if "node_name" in point:
+                    point["node_name"] = gpu_monitor_hostname_to_slurm_node(point["node_name"])
+        return data
+
+    if query == "alerts" and isinstance(data, dict) and "items" in data:
+        for item in data["items"]:
+            if item.get("entity_type") == "node" and "entity_id" in item:
+                item["entity_id"] = gpu_monitor_hostname_to_slurm_node(item["entity_id"])
+        return data
+
+    return data
+
+
 def validate_cluster(view):
     """Decorator for Flask views functions check for valid cluster path parameter."""
 
@@ -262,6 +312,34 @@ def proxy_agent(*args, **kwargs):
     return asyncio_run(async_proxy_agent(*args, **kwargs))
 
 
+async def async_proxy_gpu_monitor(query: str):
+    base_url = current_app.settings.gpu_monitor.host.geturl().rstrip("/")
+    url = f"{base_url}/api/v1/{query}"
+    if len(request.query_string):
+        url += f"?{request.query_string.decode()}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                try:
+                    data = await response.json()
+                    return jsonify(transform_gpu_monitor_response(query, data)), response.status
+                except aiohttp.client_exceptions.ContentTypeError as err:
+                    msg = (
+                        f"Unsupported Content-Type for GPU monitor URL "
+                        f"{err.request_info.url}: {err}"
+                    )
+                    logger.error(msg)
+                    abort(500, msg)
+    except aiohttp.ClientConnectionError as err:
+        logger.error("Connection error with GPU monitor: %s", str(err))
+        abort(500, f"Connection error: {str(err)}")
+
+
+def proxy_gpu_monitor(query: str):
+    return asyncio_run(async_proxy_gpu_monitor(query))
+
+
 @check_jwt
 @validate_cluster
 def stats(cluster: str):
@@ -326,6 +404,48 @@ def accounts(cluster: str):
 @validate_cluster
 def metrics(cluster: str, metric: str):
     return proxy_agent(cluster, f"metrics/{metric}", request.token)
+
+
+@check_jwt
+@validate_cluster
+def gpu_monitor_overview(cluster: str):
+    return proxy_gpu_monitor("overview/realtime")
+
+
+@check_jwt
+@validate_cluster
+def gpu_monitor_jobs(cluster: str):
+    return proxy_gpu_monitor("jobs")
+
+
+@check_jwt
+@validate_cluster
+def gpu_monitor_job(cluster: str, job: int):
+    return proxy_gpu_monitor(f"jobs/{job}")
+
+
+@check_jwt
+@validate_cluster
+def gpu_monitor_nodes(cluster: str):
+    return proxy_gpu_monitor("nodes")
+
+
+@check_jwt
+@validate_cluster
+def gpu_monitor_node(cluster: str, name: str):
+    return proxy_gpu_monitor(f"nodes/{slurm_node_to_gpu_monitor_hostname(name)}")
+
+
+@check_jwt
+@validate_cluster
+def gpu_monitor_users(cluster: str):
+    return proxy_gpu_monitor("users")
+
+
+@check_jwt
+@validate_cluster
+def gpu_monitor_alerts(cluster: str):
+    return proxy_gpu_monitor("alerts")
 
 
 @check_jwt
