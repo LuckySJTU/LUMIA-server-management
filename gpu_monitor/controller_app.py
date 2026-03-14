@@ -750,7 +750,14 @@ def realtime_overview(session: Session = Depends(get_session)) -> dict[str, Any]
         for row in session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= since)).scalars().all()
         if (row.job_id, row.step_id) in running_job_keys
     ]
-    if not rows:
+    latest_rows_by_mapping: dict[tuple[str, str, str, str], GpuUsageMinute] = {}
+    for row in rows:
+        key = (row.job_id, row.step_id, row.node_name, row.gpu_uuid)
+        existing = latest_rows_by_mapping.get(key)
+        if existing is None or row.ts > existing.ts:
+            latest_rows_by_mapping[key] = row
+    latest_rows = list(latest_rows_by_mapping.values())
+    if not latest_rows:
         return {
             "running_job_count": 0,
             "allocated_gpu_count": 0,
@@ -759,16 +766,17 @@ def realtime_overview(session: Session = Depends(get_session)) -> dict[str, Any]
             "low_util_job_count": 0,
             "active_alert_count": 0,
         }
-    job_ids = {row.job_id for row in rows}
+    job_ids = {row.job_id for row in latest_rows}
+    rows_for_running_jobs = [row for row in latest_rows if row.job_id in job_ids]
     low_util_jobs = {
-        row.job_id for row in rows if row.gpu_util_percent < 10
+        row.job_id for row in rows_for_running_jobs if row.gpu_util_percent < 10
     }
     active_alert_count = session.scalar(select(func.count()).select_from(Alert).where(Alert.status == "active")) or 0
     return {
         "running_job_count": len(job_ids),
-        "allocated_gpu_count": len({row.gpu_uuid for row in rows}),
-        "avg_gpu_util_percent": round(sum(row.gpu_util_percent for row in rows) / len(rows), 2),
-        "avg_mem_util_percent": round(sum(row.mem_util_percent for row in rows) / len(rows), 2),
+        "allocated_gpu_count": len({row.gpu_uuid for row in rows_for_running_jobs}),
+        "avg_gpu_util_percent": round(sum(row.gpu_util_percent for row in rows_for_running_jobs) / len(rows_for_running_jobs), 2),
+        "avg_mem_util_percent": round(sum(row.mem_util_percent for row in rows_for_running_jobs) / len(rows_for_running_jobs), 2),
         "low_util_job_count": len(low_util_jobs),
         "active_alert_count": int(active_alert_count),
     }

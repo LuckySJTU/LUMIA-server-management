@@ -257,10 +257,8 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 
 ### 2. hook 的行为
 
-- `Prolog/Epilog` 负责 allocation 级别事件，用于支持 `salloc` 这类“先占资源、后启动 task”的场景
-- `TaskProlog` 调用 `/usr/local/bin/get_real_gpu_id` 生成 `SLURM_REAL_GPUS`
-- `TaskProlog` 再调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-register-event`
-- `TaskEpilog` 调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-finish-event`
+- `Prolog/Epilog` 负责 allocation 级别事件，用于支持 `sbatch` / `salloc` 这类资源分配场景
+- `TaskProlog/TaskEpilog` 当前保留为占位脚本，不再做映射登记
 - `Prolog` 调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-alloc-register-event`
 - `Epilog` 调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-alloc-finish-event`
 - 节点 agent 消费这些事件后，会调用控制节点 `/api/v1/ingest/job-state` 同步作业 `RUNNING/CLOSED` 状态
@@ -281,8 +279,7 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 
 - 纯 `salloc` 只建立 allocation，不一定马上触发 task 级 hook
 - 为了捕获这类“已占用但未启动 task”的 GPU 资源，建议启用 `PrologFlags=Alloc`
-- 当前实现里，`Prolog/Epilog` 负责 allocation 级事件，`TaskProlog/TaskEpilog` 负责 task 级精确映射
-- 如果后续 `salloc` 内再启动 `srun`/task，task 级事件会对同一组映射做幂等更新
+- 当前实现里，`Prolog/Epilog` 负责 allocation 级事件；`TaskProlog/TaskEpilog` 已停用，避免重复登记
 - 如果 `Prolog` 环境拿不到 GPU 编号，可以使用用户 shell 兜底上报
 
 用户 shell 兜底方式：
@@ -294,6 +291,7 @@ source /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_shell_register.sh
 这个脚本会：
 
 - 检查当前是否处于 Slurm 作业环境
+- 只在没有 `SLURM_STEP_ID` 的顶层 allocation shell 中执行，用于 `salloc` 兜底
 - 调用 `/usr/local/bin/get_real_gpu_id` 生成 `SLURM_REAL_GPUS`
 - 通过 `emit-shell-register-event` 把当前 shell 的真实 GPU 分配上报给节点 agent
 - 使用 `GPU_MONITOR_SHELL_REGISTERED=1` 防止同一个 shell 重复上报
@@ -339,6 +337,7 @@ fi
 - 只对普通用户生效，不对 `root` 生效
 - 只在 Slurm 作业环境中执行
 - 只在交互 shell 中执行，避免影响非交互命令
+- 由于 `slurm_shell_register.sh` 会在检测到 `SLURM_STEP_ID` 时自动跳过，因此不会与 `sbatch` / `srun` / `TaskProlog` 的任务级登记冲突
 - `bash` 用户通常走 `/etc/profile.d/*.sh`
 - `zsh` 用户通常走 `/etc/zsh/zprofile`
 
@@ -455,6 +454,12 @@ fi
 - 小时聚合与告警扫描内置在 API 进程中，方便一期落地；后续可拆分成独立 worker
 - 一期未覆盖 MIG、MPS、多任务共享同一张 GPU 的精细归因
 - `SLURM_JOB_GPUS` 默认按 `0,1,2` 这样的物理 GPU index 解析；如果集群里变量格式不同，需要按实际 Slurm 输出格式调整 `build_mapping_from_env`
+
+实时总览口径说明：
+
+- `GET /api/v1/overview/realtime` 只统计控制节点当前标记为 `RUNNING` 的作业
+- 该接口会在最近 15 分钟窗口内，为每个 `job_id + step_id + node_name + gpu_uuid` 只取最新一条样本作为当前快照
+- `allocated_gpu_count`、`avg_gpu_util_percent`、`avg_mem_util_percent`、`low_util_job_count` 都基于这个当前快照计算
 
 ## 验证建议
 
