@@ -6,6 +6,5 @@ export PYTHONPATH="${SCRIPT_DIR}/..:${PYTHONPATH:-}"
 PYTHON_BIN="${GPU_MONITOR_PYTHON:-/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python3}"
 export PYTHON_BIN
 
-# GPU 映射注销不要放在 Epilog 中。
-# 在启用 task/cgroup 的集群上，请改用 TaskEpilog 调用 slurm_task_epilog.sh。
-exit 0
+# 这里用于捕获 allocation 级别释放事件，例如纯 salloc 结束释放资源的场景。
+"${PYTHON_BIN}" -m gpu_monitor.node_agent emit-alloc-finish-event

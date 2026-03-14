@@ -187,6 +187,29 @@ class NodeStore:
         )
         self.connection.commit()
 
+    def replace_job_mappings(self, mappings: list[dict[str, Any]]) -> None:
+        if not mappings:
+            return
+        first = mappings[0]
+        desired_gpu_uuids = {mapping["gpu_uuid"] for mapping in mappings}
+        self.connection.execute(
+            """
+            UPDATE active_mappings
+            SET state = 'CLOSED', last_seen_time = ?
+            WHERE job_id = ? AND step_id = ? AND node_name = ? AND state != 'CLOSED' AND gpu_uuid NOT IN ({placeholders})
+            """.format(placeholders=",".join("?" for _ in desired_gpu_uuids)),
+            [
+                utcnow().isoformat(),
+                first["job_id"],
+                first["step_id"],
+                first["node_name"],
+                *sorted(desired_gpu_uuids),
+            ],
+        )
+        self.connection.commit()
+        for mapping in mappings:
+            self.upsert_mapping(mapping)
+
     def mark_job_state(self, job_id: str, step_id: str, state: str) -> None:
         self.connection.execute(
             """
@@ -305,22 +328,51 @@ class NodeStore:
 
     def process_task_event(self, event: dict[str, Any]) -> None:
         action = event.get("action")
-        if action == "register":
+        if action in {"register", "register_alloc"}:
             for mapping in event.get("mappings", []):
                 self.upsert_mapping(mapping)
             return
-        if action == "finish":
+        if action == "register_shell":
+            self.replace_job_mappings(event.get("mappings", []))
+            return
+        if action in {"finish", "finish_alloc"}:
             self.mark_job_state(event["job_id"], event["step_id"], event.get("state", "CLOSED"))
             return
         raise RuntimeError(f"Unsupported task event action: {action}")
 
 
-def build_mapping_from_env(config: NodeConfig, provider: NVMLProvider) -> list[dict[str, Any]]:
+def build_mapping_from_env(config: NodeConfig, provider: NVMLProvider, source_mode: str = "task") -> list[dict[str, Any]]:
     raw_real_gpus = _resolve_real_gpu_ids()
     raw_visible_gpus = os.getenv("CUDA_VISIBLE_DEVICES") or os.getenv("GPU_DEVICE_ORDINAL") or ""
     raw_slurm_gpus = os.getenv("SLURM_STEP_GPUS") or os.getenv("SLURM_JOB_GPUS") or ""
 
-    if raw_real_gpus:
+    if source_mode == "allocation":
+        if not raw_slurm_gpus:
+            LOGGER.warning(
+                "skip allocation event because no GPU list found in SLURM_STEP_GPUS / SLURM_JOB_GPUS; "
+                "job_id=%s step_id=%s",
+                os.getenv("SLURM_JOB_ID", "unknown"),
+                os.getenv("SLURM_STEP_ID", "batch"),
+            )
+            return []
+        gpu_indices = _parse_gpu_index_list(raw_slurm_gpus)
+        gpu_pairs = [(gpu_index, gpu_index) for gpu_index in gpu_indices]
+        gpu_source = "slurm_allocation"
+    elif source_mode == "shell_real":
+        if not raw_real_gpus:
+            raise RuntimeError("No GPU list found in SLURM_REAL_GPUS for shell event")
+        real_gpu_indices = _parse_gpu_index_list(raw_real_gpus)
+        visible_nvml_indices = provider.visible_indices()
+        if not visible_nvml_indices:
+            raise RuntimeError("No NVML-visible GPUs found while SLURM_REAL_GPUS is set for shell event")
+        if len(real_gpu_indices) != len(visible_nvml_indices):
+            raise RuntimeError(
+                "SLURM_REAL_GPUS count does not match NVML-visible GPU count for shell event; "
+                f"SLURM_REAL_GPUS={raw_real_gpus} visible_nvml_indices={visible_nvml_indices}"
+            )
+        gpu_pairs = list(zip(real_gpu_indices, visible_nvml_indices))
+        gpu_source = "shell_real"
+    elif raw_real_gpus:
         real_gpu_indices = _parse_gpu_index_list(raw_real_gpus)
         visible_nvml_indices = provider.visible_indices()
         if not visible_nvml_indices:
@@ -375,14 +427,6 @@ def build_mapping_from_env(config: NodeConfig, provider: NVMLProvider) -> list[d
                 "state": "RUNNING",
             }
         )
-    LOGGER.info(
-        "registering job mapping job_id=%s step_id=%s source=%s gpu_pairs=%s gpu_uuids=%s",
-        job_id,
-        step_id,
-        gpu_source,
-        gpu_pairs,
-        [entry["gpu_uuid"] for entry in entries],
-    )
     return entries
 
 
@@ -392,9 +436,29 @@ def emit_task_event(config: NodeConfig, provider: NVMLProvider, action: str) -> 
             "action": "register",
             "mappings": build_mapping_from_env(config, provider),
         }
+    elif action == "register_alloc":
+        mappings = build_mapping_from_env(config, provider, source_mode="allocation")
+        if not mappings:
+            raise RuntimeError("SKIP_EVENT_NO_ALLOCATION_GPU_MAPPING")
+        payload = {
+            "action": "register_alloc",
+            "mappings": mappings,
+        }
+    elif action == "register_shell":
+        payload = {
+            "action": "register_shell",
+            "mappings": build_mapping_from_env(config, provider, source_mode="shell_real"),
+        }
     elif action == "finish":
         payload = {
             "action": "finish",
+            "job_id": os.getenv("SLURM_JOB_ID", "unknown"),
+            "step_id": os.getenv("SLURM_STEP_ID", "batch"),
+            "state": "CLOSED",
+        }
+    elif action == "finish_alloc":
+        payload = {
+            "action": "finish_alloc",
             "job_id": os.getenv("SLURM_JOB_ID", "unknown"),
             "step_id": os.getenv("SLURM_STEP_ID", "batch"),
             "state": "CLOSED",
@@ -420,6 +484,7 @@ def process_task_events(config: NodeConfig, store: NodeStore) -> int:
         try:
             event = json.loads(event_path.read_text(encoding="utf-8"))
             store.process_task_event(event)
+            _sync_job_state_event(config, event)
             event_path.unlink()
             processed += 1
         except FileNotFoundError:
@@ -427,6 +492,66 @@ def process_task_events(config: NodeConfig, store: NodeStore) -> int:
         except Exception:
             LOGGER.exception("failed to process task event file %s", event_path)
     return processed
+
+
+def _send_job_state(
+    config: NodeConfig,
+    *,
+    job_id: str,
+    step_id: str,
+    state: str,
+    node_name: str | None = None,
+    user_name: str | None = None,
+    uid: int | None = None,
+    gpu_count: int | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "job_id": job_id,
+        "step_id": step_id,
+        "state": state,
+        "ts": utcnow().isoformat(),
+        "node_name": node_name or config.node_name,
+    }
+    if user_name is not None:
+        payload["user_name"] = user_name
+    if uid is not None:
+        payload["uid"] = uid
+    if gpu_count is not None:
+        payload["gpu_count"] = gpu_count
+    requests.post(
+        f"{config.api_base_url.rstrip('/')}/api/v1/ingest/job-state",
+        json=payload,
+        timeout=config.request_timeout_seconds,
+        verify=config.verify_tls,
+    ).raise_for_status()
+
+
+def _sync_job_state_event(config: NodeConfig, event: dict[str, Any]) -> None:
+    action = event.get("action")
+    if action in {"register", "register_alloc", "register_shell"}:
+        mappings = event.get("mappings", [])
+        if not mappings:
+            return
+        first = mappings[0]
+        _send_job_state(
+            config,
+            job_id=first["job_id"],
+            step_id=first["step_id"],
+            state="RUNNING",
+            node_name=first.get("node_name"),
+            user_name=first.get("user_name"),
+            uid=int(first["uid"]),
+            gpu_count=len({mapping["gpu_uuid"] for mapping in mappings}),
+        )
+        return
+    if action in {"finish", "finish_alloc"}:
+        _send_job_state(
+            config,
+            job_id=event["job_id"],
+            step_id=event["step_id"],
+            state=event.get("state", "CLOSED"),
+        )
+        return
 
 
 def capture_samples(config: NodeConfig, store: NodeStore, provider: NVMLProvider) -> int:
@@ -559,6 +684,9 @@ def cli() -> None:
     subparsers.add_parser("finish-job")
     subparsers.add_parser("emit-register-event")
     subparsers.add_parser("emit-finish-event")
+    subparsers.add_parser("emit-alloc-register-event")
+    subparsers.add_parser("emit-alloc-finish-event")
+    subparsers.add_parser("emit-shell-register-event")
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -595,6 +723,24 @@ def cli() -> None:
 
     if args.command == "emit-finish-event":
         emit_task_event(config, provider, "finish")
+        return
+
+    if args.command == "emit-alloc-register-event":
+        try:
+            emit_task_event(config, provider, "register_alloc")
+        except RuntimeError as exc:
+            if str(exc) == "SKIP_EVENT_NO_ALLOCATION_GPU_MAPPING":
+                LOGGER.info("skip allocation register event without GPU mapping")
+                return
+            raise
+        return
+
+    if args.command == "emit-alloc-finish-event":
+        emit_task_event(config, provider, "finish_alloc")
+        return
+
+    if args.command == "emit-shell-register-event":
+        emit_task_event(config, provider, "register_shell")
 
 
 if __name__ == "__main__":

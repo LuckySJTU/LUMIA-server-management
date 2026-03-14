@@ -29,10 +29,10 @@
 ## 一期能力
 
 - 基于 `TaskProlog/TaskEpilog` + 节点 agent 事件消费维护 job-user-node-gpu 映射
-- 节点端每分钟采集活跃 GPU 的 `gpu_util_percent` / `mem_used_bytes` / `mem_total_bytes` / `mem_util_percent`
+- 节点端每 15 秒采集活跃 GPU 的 `gpu_util_percent` / `mem_used_bytes` / `mem_total_bytes` / `mem_util_percent`
 - 节点端用 SQLite WAL 做本地缓存，控制节点不可达时保留最近 2 小时未送达样本
   - 当前默认已调整为保留最近 24 小时未送达样本
-- 节点端每 5 分钟批量上报 `/api/v1/ingest/metrics`
+- 节点端每 1 分钟批量上报 `/api/v1/ingest/metrics`
 - 控制节点提供以下 API：
   - `POST /api/v1/ingest/metrics`
   - `POST /api/v1/ingest/heartbeat`
@@ -147,12 +147,13 @@ export GPU_MONITOR_CLUSTER_NAME="lumia"
 export GPU_MONITOR_NODE_NAME="$(hostname -s)"
 export GPU_MONITOR_NODE_DB="/var/lib/gpu-monitor/node-agent.db"
 export GPU_MONITOR_API_BASE_URL="http://<汇总节点IP>:8000"
-export GPU_MONITOR_SAMPLE_INTERVAL_SECONDS="60"
-export GPU_MONITOR_FLUSH_INTERVAL_SECONDS="300"
+export GPU_MONITOR_SAMPLE_INTERVAL_SECONDS="15"
+export GPU_MONITOR_FLUSH_INTERVAL_SECONDS="60"
 export GPU_MONITOR_HEARTBEAT_INTERVAL_SECONDS="300"
 export GPU_MONITOR_MAPPING_STALE_MINUTES="10"
 export GPU_MONITOR_UNDELIVERED_RETENTION_HOURS="24"
 export GPU_MONITOR_UNDELIVERED_MAX_RECORDS="100000"
+export GPU_MONITOR_WORKER_INTERVAL_SECONDS="60"
 ```
 
 说明：
@@ -162,6 +163,7 @@ export GPU_MONITOR_UNDELIVERED_MAX_RECORDS="100000"
 - 如果 agent 挂掉、任务异常结束或事件丢失，超过该时间的映射会被自动标记为 `CLOSED`
 - `GPU_MONITOR_UNDELIVERED_RETENTION_HOURS` 控制控制节点不可达时，本地未上报样本的最长保留时间
 - `GPU_MONITOR_UNDELIVERED_MAX_RECORDS` 控制本地未上报队列的上限
+- `GPU_MONITOR_WORKER_INTERVAL_SECONDS` 控制控制节点聚合、告警扫描、清理任务的执行周期
 
 重启影响说明：
 
@@ -222,6 +224,7 @@ chmod +x /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_prolog.sh
 chmod +x /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_epilog.sh
 chmod +x /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_task_prolog.sh
 chmod +x /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_task_epilog.sh
+chmod +x /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_shell_register.sh
 ```
 
 在 `slurm.conf` 中配置：
@@ -231,6 +234,7 @@ Prolog=/home/yxwang/LUMIA-server-management/gpu_monitor/slurm_prolog.sh
 Epilog=/home/yxwang/LUMIA-server-management/gpu_monitor/slurm_epilog.sh
 TaskProlog=/home/yxwang/LUMIA-server-management/gpu_monitor/slurm_task_prolog.sh
 TaskEpilog=/home/yxwang/LUMIA-server-management/gpu_monitor/slurm_task_epilog.sh
+PrologFlags=Alloc
 ```
 
 然后重载 Slurm：
@@ -253,10 +257,13 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 
 ### 2. hook 的行为
 
-- `Prolog/Epilog` 只保留节点级辅助逻辑
+- `Prolog/Epilog` 负责 allocation 级别事件，用于支持 `salloc` 这类“先占资源、后启动 task”的场景
 - `TaskProlog` 调用 `/usr/local/bin/get_real_gpu_id` 生成 `SLURM_REAL_GPUS`
 - `TaskProlog` 再调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-register-event`
 - `TaskEpilog` 调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-finish-event`
+- `Prolog` 调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-alloc-register-event`
+- `Epilog` 调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-alloc-finish-event`
+- 节点 agent 消费这些事件后，会调用控制节点 `/api/v1/ingest/job-state` 同步作业 `RUNNING/CLOSED` 状态
 
 脚本会读取：
 
@@ -269,6 +276,71 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 - `CUDA_VISIBLE_DEVICES`
 
 内部统一把 `gpu_index` 转换成 `gpu_uuid` 存储。
+
+关于 `salloc` 支持：
+
+- 纯 `salloc` 只建立 allocation，不一定马上触发 task 级 hook
+- 为了捕获这类“已占用但未启动 task”的 GPU 资源，建议启用 `PrologFlags=Alloc`
+- 当前实现里，`Prolog/Epilog` 负责 allocation 级事件，`TaskProlog/TaskEpilog` 负责 task 级精确映射
+- 如果后续 `salloc` 内再启动 `srun`/task，task 级事件会对同一组映射做幂等更新
+- 如果 `Prolog` 环境拿不到 GPU 编号，可以使用用户 shell 兜底上报
+
+用户 shell 兜底方式：
+
+```bash
+source /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_shell_register.sh
+```
+
+这个脚本会：
+
+- 检查当前是否处于 Slurm 作业环境
+- 调用 `/usr/local/bin/get_real_gpu_id` 生成 `SLURM_REAL_GPUS`
+- 通过 `emit-shell-register-event` 把当前 shell 的真实 GPU 分配上报给节点 agent
+- 使用 `GPU_MONITOR_SHELL_REGISTERED=1` 防止同一个 shell 重复上报
+
+如果希望在 `salloc` 进入交互 shell 后自动上报，可以在用户的 `~/.bashrc` 或 `~/.zshrc` 中加入：
+
+```bash
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    source /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_shell_register.sh
+fi
+```
+
+如果希望对所有普通用户生效，而不是逐个修改用户家目录，建议做系统级 shell 集成。
+
+`bash` 推荐方式：
+
+创建 `/etc/profile.d/gpu-monitor-shell-register.sh`：
+
+```bash
+case $- in
+    *i*)
+        if [[ "${EUID:-$(id -u)}" -ne 0 ]] && [[ -n "${SLURM_JOB_ID:-}" ]]; then
+            source /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_shell_register.sh
+        fi
+        ;;
+esac
+```
+
+`zsh` 推荐方式：
+
+创建 `/etc/zsh/zprofile` 或在现有 `/etc/zsh/zprofile` 中加入：
+
+```zsh
+if [[ -o interactive ]]; then
+    if [[ "${EUID:-$(id -u)}" -ne 0 ]] && [[ -n "${SLURM_JOB_ID:-}" ]]; then
+        source /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_shell_register.sh
+    fi
+fi
+```
+
+说明：
+
+- 只对普通用户生效，不对 `root` 生效
+- 只在 Slurm 作业环境中执行
+- 只在交互 shell 中执行，避免影响非交互命令
+- `bash` 用户通常走 `/etc/profile.d/*.sh`
+- `zsh` 用户通常走 `/etc/zsh/zprofile`
 
 在启用 `task/cgroup` 的集群上，推荐优先使用真实 GPU 编号：
 
@@ -292,6 +364,8 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 
 - `gpu_uuid`：任务环境中实际可见并被分配到的那张卡的真实 UUID
 - `gpu_index`：节点上的真实物理 GPU id，例如 `SLURM_REAL_GPUS=3` 中的 `3`
+- `job_meta.node_list`：该 `job_id + step_id` 在分钟表中实际出现过的节点去重列表
+- `job_meta.gpu_count`：该 `job_id + step_id` 在分钟表中实际出现过的 GPU UUID 去重数
 
 因此在 `task/cgroup` 模式下，可能出现：
 
@@ -369,9 +443,10 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 
 规则计算说明：
 
-- 时间窗口按分钟桶去重后判断，不按样本条数判断
+- 时间窗口按分钟桶跨度判断，不按样本条数判断
 - 多卡任务在同一分钟可能产生多条样本，但只计作 1 个分钟桶
 - 平均利用率也按“每分钟先聚合，再对分钟窗口求平均”的方式计算
+- 即使中间偶尔丢了少量分钟样本，只要窗口跨度达到 30 分钟 / 1 小时 / 2 小时，仍可参与对应告警判断
 
 ## 实现说明与边界
 
@@ -388,6 +463,97 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 ```bash
 curl http://127.0.0.1:8000/api/v1/overview/realtime
 ```
+
+### 1.1 调试单个任务的实时统计状态
+
+如果发现任务在计算节点已经 `CLOSED`，但控制节点实时总览仍把它算作 `running_job_count`，可以调用调试接口：
+
+```bash
+curl http://127.0.0.1:8000/api/v1/debug/jobs/<job_id>
+```
+
+这个接口会返回：
+
+- 控制节点当前保存的 `job_meta` 记录
+- 该任务哪些 `step_id` 仍被视为 `RUNNING`
+- 最近 15 分钟分钟样本
+- 每条最近样本是否被实时总览计入
+
+重点检查：
+
+- `job_meta.state` 是否仍然是 `RUNNING`
+- `job_meta.end_time` 是否为空
+- 是否存在某个 `step_id` 仍然没有收到 `CLOSED`
+- `recent_samples` 中的 `counted_in_realtime` 是否仍为 `true`
+
+当前实现中：
+
+- `TaskEpilog` 产生的 `CLOSED` 事件如果同步控制节点失败，不会再立即删除事件文件，agent 后续会继续重试
+- 控制节点收到迟到的旧分钟样本时，不会再把已 `CLOSED` 的 `job_meta` 重新改回 `RUNNING`
+
+### 1.2 调试单个任务为什么没有触发告警
+
+如果怀疑某个任务应该触发告警，但控制节点没有生成 `alerts` 记录，可以调用：
+
+```bash
+curl http://127.0.0.1:8000/api/v1/debug/alerts/jobs/<job_id>
+```
+
+这个接口会返回：
+
+- `runtime_minutes`
+- 最近 30 分钟窗口的 `minute_count` / `minute_span`
+- 最近 30 分钟窗口的 `avg_gpu_util_percent` / `avg_mem_util_percent`
+- 最近 2 小时窗口的 `minute_count` / `minute_span`
+- 最近 2 小时窗口的 `avg_gpu_util_percent`
+- 各条 job 级告警规则当前“按逻辑是否应当触发”
+- 当前数据库里已经存在的 active 告警
+- 最近一小段样本预览
+
+重点看：
+
+- `window_30m.rule_low_util_30m_would_fire`
+- `window_30m.rule_high_mem_low_gpu_would_fire`
+- `window_2h.rule_low_util_2h_would_fire`
+- `runtime_minutes`
+- `minute_span`
+- `avg_gpu_util_percent`
+
+如果 `would_fire=true` 但 `active_alerts` 仍为空，就说明问题在控制节点 worker 扫描链路；如果 `would_fire=false`，就说明是规则条件本身还没满足。
+
+### 1.3 调试用户级告警为什么触发/未触发
+
+如果要定位某个用户为什么出现或没有出现 `user_low_util` 告警，可以调用：
+
+```bash
+curl http://127.0.0.1:8000/api/v1/debug/alerts/users/<user_name>
+```
+
+这个接口会返回：
+
+- 最近 1 小时窗口的 `minute_count` / `minute_span`
+- `allocated_gpu_count`
+- `avg_gpu_util_percent`
+- `rule_user_low_util_would_fire`
+- 当前数据库里该用户的 active 告警
+- 最近一小段样本预览
+
+### 1.4 调试节点级告警为什么触发/未触发
+
+如果要定位某个节点为什么出现或没有出现 `node_low_util` 告警，可以调用：
+
+```bash
+curl http://127.0.0.1:8000/api/v1/debug/alerts/nodes/<node_name>
+```
+
+这个接口会返回：
+
+- 最近 1 小时窗口的 `minute_count` / `minute_span`
+- `low_util_gpu_count`
+- `low_util_gpu_uuids`
+- `rule_node_low_util_would_fire`
+- 当前数据库里该节点的 active 告警
+- 最近一小段样本预览
 
 ### 2. 验证计算节点 hook
 

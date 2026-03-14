@@ -150,6 +150,17 @@ class HeartbeatIn(BaseModel):
     active_gpu_count: int
 
 
+class JobStateIn(BaseModel):
+    job_id: str
+    step_id: str = "batch"
+    state: str
+    ts: datetime
+    node_name: str | None = None
+    user_name: str | None = None
+    uid: int | None = None
+    gpu_count: int | None = None
+
+
 config = ControllerConfig()
 if config.database_url.startswith("sqlite"):
     sqlite_path = config.database_url.removeprefix("sqlite+pysqlite:///")
@@ -179,7 +190,34 @@ def _parse_range(range_name: str) -> tuple[datetime, datetime]:
     raise HTTPException(status_code=400, detail="range must be one of realtime, 1d, 1w")
 
 
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=utcnow().tzinfo)
+    return dt
+
+
+def _compute_job_meta_stats(session: Session, job_id: str, step_id: str) -> tuple[list[str], int]:
+    node_list = sorted(
+        session.execute(
+            select(GpuUsageMinute.node_name)
+            .where(GpuUsageMinute.job_id == job_id, GpuUsageMinute.step_id == step_id)
+            .distinct()
+        ).scalars().all()
+    )
+    gpu_count = len(
+        session.execute(
+            select(GpuUsageMinute.gpu_uuid)
+            .where(GpuUsageMinute.job_id == job_id, GpuUsageMinute.step_id == step_id)
+            .distinct()
+        ).scalars().all()
+    )
+    return node_list, gpu_count
+
+
 def _upsert_job_meta(session: Session, sample: MetricSampleIn) -> None:
+    node_list, gpu_count = _compute_job_meta_stats(session, sample.job_id, sample.step_id)
     existing = session.execute(
         select(JobMeta).where(JobMeta.job_id == sample.job_id, JobMeta.step_id == sample.step_id)
     ).scalar_one_or_none()
@@ -191,17 +229,51 @@ def _upsert_job_meta(session: Session, sample: MetricSampleIn) -> None:
                 user_name=sample.user_name,
                 uid=sample.uid,
                 state="RUNNING",
-                node_list=[sample.node_name],
-                gpu_count=1,
+                node_list=node_list or [sample.node_name],
+                gpu_count=gpu_count or 1,
                 start_time=sample.ts,
             )
         )
         return
-    node_list = sorted(set(existing.node_list + [sample.node_name]))
     existing.node_list = node_list
-    existing.gpu_count = max(existing.gpu_count, len(node_list))
+    existing.gpu_count = gpu_count
+    sample_ts = _as_utc(sample.ts)
+    existing_end_time = _as_utc(existing.end_time)
+    if existing.state == "CLOSED" and existing_end_time is not None and sample_ts is not None and sample_ts <= existing_end_time:
+        return
     existing.state = "RUNNING"
     existing.end_time = None
+
+
+def _upsert_job_meta_state(session: Session, payload: JobStateIn) -> None:
+    existing = session.execute(
+        select(JobMeta).where(JobMeta.job_id == payload.job_id, JobMeta.step_id == payload.step_id)
+    ).scalar_one_or_none()
+    if existing is None:
+        session.add(
+            JobMeta(
+                job_id=payload.job_id,
+                step_id=payload.step_id,
+                user_name=payload.user_name or "unknown",
+                uid=payload.uid if payload.uid is not None else -1,
+                state=payload.state,
+                node_list=[payload.node_name] if payload.node_name else [],
+                gpu_count=payload.gpu_count or 0,
+                start_time=payload.ts,
+                end_time=payload.ts if payload.state == "CLOSED" else None,
+            )
+        )
+        return
+    if payload.user_name:
+        existing.user_name = payload.user_name
+    if payload.uid is not None:
+        existing.uid = payload.uid
+    if payload.node_name:
+        existing.node_list = sorted(set((existing.node_list or []) + [payload.node_name]))
+    if payload.gpu_count is not None:
+        existing.gpu_count = max(existing.gpu_count, payload.gpu_count)
+    existing.state = payload.state
+    existing.end_time = payload.ts if payload.state == "CLOSED" else None
 
 
 def _serialize_user_hourly(row: UserUsageHourly) -> dict[str, Any]:
@@ -362,12 +434,189 @@ def _avg_gpu_mem_by_minute(minute_rows: dict[datetime, list[GpuUsageMinute]]) ->
     return count, sum(per_minute_gpu) / count, sum(per_minute_mem) / count
 
 
+def _minute_span(minute_rows: dict[datetime, list[GpuUsageMinute]]) -> int:
+    if not minute_rows:
+        return 0
+    buckets = sorted(minute_rows.keys())
+    return int((buckets[-1] - buckets[0]).total_seconds() // 60) + 1
+
+
+def _job_runtime_minutes(session: Session, job_id: str) -> float:
+    job = session.execute(
+        select(JobMeta).where(JobMeta.job_id == job_id).order_by(JobMeta.start_time.asc())
+    ).scalars().first()
+    if job is None:
+        return 0.0
+    start_time = _as_utc(job.start_time)
+    if start_time is None:
+        return 0.0
+    return max(0.0, (utcnow() - start_time).total_seconds() / 60.0)
+
+
+def _build_job_alert_debug(session: Session, job_id: str) -> dict[str, Any]:
+    now = utcnow()
+    rows_30m = session.execute(
+        select(GpuUsageMinute).where(GpuUsageMinute.job_id == job_id, GpuUsageMinute.ts >= now - timedelta(minutes=31))
+    ).scalars().all()
+    rows_2h = session.execute(
+        select(GpuUsageMinute).where(GpuUsageMinute.job_id == job_id, GpuUsageMinute.ts >= now - timedelta(hours=2, minutes=1))
+    ).scalars().all()
+    minute_rows_30m = _group_rows_by_key_and_minute(rows_30m, lambda row: row.job_id).get(job_id, {})
+    minute_rows_2h = _group_rows_by_key_and_minute(rows_2h, lambda row: row.job_id).get(job_id, {})
+    minute_count_30m, avg_gpu_30m, avg_mem_30m = _avg_gpu_mem_by_minute(minute_rows_30m)
+    minute_count_2h, avg_gpu_2h = _avg_gpu_by_minute(minute_rows_2h)
+    minute_span_30m = _minute_span(minute_rows_30m)
+    minute_span_2h = _minute_span(minute_rows_2h)
+    runtime_minutes = _job_runtime_minutes(session, job_id)
+    active_alerts = session.execute(
+        select(Alert).where(Alert.entity_type == "job", Alert.entity_id == job_id, Alert.status == "active")
+    ).scalars().all()
+    return {
+        "job_id": job_id,
+        "debug_time": now.isoformat(),
+        "runtime_minutes": round(runtime_minutes, 2),
+        "window_30m": {
+            "minute_count": minute_count_30m,
+            "minute_span": minute_span_30m,
+            "avg_gpu_util_percent": round(avg_gpu_30m, 4),
+            "avg_mem_util_percent": round(avg_mem_30m, 4),
+            "rule_low_util_30m_would_fire": runtime_minutes >= 30 and minute_span_30m >= 30 and minute_count_30m >= 1 and avg_gpu_30m < 10,
+            "rule_high_mem_low_gpu_would_fire": runtime_minutes >= 30 and minute_span_30m >= 30 and minute_count_30m >= 1 and avg_mem_30m > 60 and avg_gpu_30m < 10,
+        },
+        "window_2h": {
+            "minute_count": minute_count_2h,
+            "minute_span": minute_span_2h,
+            "avg_gpu_util_percent": round(avg_gpu_2h, 4),
+            "rule_low_util_2h_would_fire": runtime_minutes >= 120 and minute_span_2h >= 120 and minute_count_2h >= 1 and avg_gpu_2h < 5,
+        },
+        "active_alerts": [
+            {
+                "rule_name": alert.rule_name,
+                "level": alert.level,
+                "summary": alert.summary,
+                "start_time": alert.start_time.isoformat(),
+                "last_seen_time": alert.last_seen_time.isoformat(),
+            }
+            for alert in active_alerts
+        ],
+        "recent_samples_preview": [
+            {
+                "ts": row.ts.isoformat(),
+                "step_id": row.step_id,
+                "node_name": row.node_name,
+                "gpu_uuid": row.gpu_uuid,
+                "gpu_util_percent": row.gpu_util_percent,
+                "mem_util_percent": row.mem_util_percent,
+            }
+            for row in rows_30m[:20]
+        ],
+    }
+
+
+def _build_user_alert_debug(session: Session, user_name: str) -> dict[str, Any]:
+    now = utcnow()
+    rows_1h = session.execute(
+        select(GpuUsageMinute).where(GpuUsageMinute.user_name == user_name, GpuUsageMinute.ts >= now - timedelta(hours=1, minutes=1))
+    ).scalars().all()
+    minute_rows_1h = _group_rows_by_key_and_minute(rows_1h, lambda row: row.user_name).get(user_name, {})
+    minute_count_1h, avg_gpu_1h = _avg_gpu_by_minute(minute_rows_1h)
+    minute_span_1h = _minute_span(minute_rows_1h)
+    allocated_gpu_count = len({row.gpu_uuid for row in rows_1h})
+    active_alerts = session.execute(
+        select(Alert).where(Alert.entity_type == "user", Alert.entity_id == user_name, Alert.status == "active")
+    ).scalars().all()
+    return {
+        "user_name": user_name,
+        "debug_time": now.isoformat(),
+        "window_1h": {
+            "minute_count": minute_count_1h,
+            "minute_span": minute_span_1h,
+            "allocated_gpu_count": allocated_gpu_count,
+            "avg_gpu_util_percent": round(avg_gpu_1h, 4),
+            "rule_user_low_util_would_fire": minute_span_1h >= 60 and minute_count_1h >= 1 and allocated_gpu_count >= 4 and avg_gpu_1h < 15,
+        },
+        "active_alerts": [
+            {
+                "rule_name": alert.rule_name,
+                "level": alert.level,
+                "summary": alert.summary,
+                "start_time": alert.start_time.isoformat(),
+                "last_seen_time": alert.last_seen_time.isoformat(),
+            }
+            for alert in active_alerts
+        ],
+        "recent_samples_preview": [
+            {
+                "ts": row.ts.isoformat(),
+                "job_id": row.job_id,
+                "step_id": row.step_id,
+                "node_name": row.node_name,
+                "gpu_uuid": row.gpu_uuid,
+                "gpu_util_percent": row.gpu_util_percent,
+                "mem_util_percent": row.mem_util_percent,
+            }
+            for row in rows_1h[:30]
+        ],
+    }
+
+
+def _build_node_alert_debug(session: Session, node_name: str) -> dict[str, Any]:
+    now = utcnow()
+    rows_1h = session.execute(
+        select(GpuUsageMinute).where(GpuUsageMinute.node_name == node_name, GpuUsageMinute.ts >= now - timedelta(hours=1, minutes=1))
+    ).scalars().all()
+    minute_rows_1h = _group_rows_by_key_and_minute(rows_1h, lambda row: row.node_name).get(node_name, {})
+    minute_count_1h = len(minute_rows_1h)
+    minute_span_1h = _minute_span(minute_rows_1h)
+    low_util_gpu_uuids: set[str] = set()
+    for rows in minute_rows_1h.values():
+        for row in rows:
+            if row.gpu_util_percent < 10:
+                low_util_gpu_uuids.add(row.gpu_uuid)
+    active_alerts = session.execute(
+        select(Alert).where(Alert.entity_type == "node", Alert.entity_id == node_name, Alert.status == "active")
+    ).scalars().all()
+    return {
+        "node_name": node_name,
+        "debug_time": now.isoformat(),
+        "window_1h": {
+            "minute_count": minute_count_1h,
+            "minute_span": minute_span_1h,
+            "low_util_gpu_count": len(low_util_gpu_uuids),
+            "low_util_gpu_uuids": sorted(low_util_gpu_uuids),
+            "rule_node_low_util_would_fire": minute_span_1h >= 60 and minute_count_1h >= 1 and len(low_util_gpu_uuids) >= 2,
+        },
+        "active_alerts": [
+            {
+                "rule_name": alert.rule_name,
+                "level": alert.level,
+                "summary": alert.summary,
+                "start_time": alert.start_time.isoformat(),
+                "last_seen_time": alert.last_seen_time.isoformat(),
+            }
+            for alert in active_alerts
+        ],
+        "recent_samples_preview": [
+            {
+                "ts": row.ts.isoformat(),
+                "job_id": row.job_id,
+                "step_id": row.step_id,
+                "user_name": row.user_name,
+                "gpu_uuid": row.gpu_uuid,
+                "gpu_util_percent": row.gpu_util_percent,
+                "mem_util_percent": row.mem_util_percent,
+            }
+            for row in rows_1h[:30]
+        ],
+    }
+
+
 def _scan_alerts(session: Session) -> None:
     now = utcnow()
     active_keys: set[tuple[str, str, str]] = set()
-    rows_30m = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(minutes=30))).scalars().all()
-    rows_2h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=2))).scalars().all()
-    rows_1h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=1))).scalars().all()
+    rows_30m = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(minutes=31))).scalars().all()
+    rows_2h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=2, minutes=1))).scalars().all()
+    rows_1h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=1, minutes=1))).scalars().all()
 
     job_30m = _group_rows_by_key_and_minute(rows_30m, lambda row: row.job_id)
     job_2h = _group_rows_by_key_and_minute(rows_2h, lambda row: row.job_id)
@@ -376,7 +625,9 @@ def _scan_alerts(session: Session) -> None:
 
     for job_id, minute_rows in job_30m.items():
         minute_count, avg_gpu, avg_mem = _avg_gpu_mem_by_minute(minute_rows)
-        if minute_count >= 30:
+        minute_span = _minute_span(minute_rows)
+        runtime_minutes = _job_runtime_minutes(session, job_id)
+        if runtime_minutes >= 30 and minute_span >= 30 and minute_count >= 1:
             if avg_gpu < 10:
                 active_keys.add(("job", job_id, "low_util_30m"))
                 _upsert_alert(session, "job", job_id, "warning", "low_util_30m", f"job {job_id} avg gpu util {avg_gpu:.2f}% in 30m")
@@ -386,7 +637,9 @@ def _scan_alerts(session: Session) -> None:
 
     for job_id, minute_rows in job_2h.items():
         minute_count, avg_gpu = _avg_gpu_by_minute(minute_rows)
-        if minute_count >= 120:
+        minute_span = _minute_span(minute_rows)
+        runtime_minutes = _job_runtime_minutes(session, job_id)
+        if runtime_minutes >= 120 and minute_span >= 120 and minute_count >= 1:
             if avg_gpu < 5:
                 active_keys.add(("job", job_id, "low_util_2h"))
                 _upsert_alert(session, "job", job_id, "critical", "low_util_2h", f"job {job_id} avg gpu util {avg_gpu:.2f}% in 2h")
@@ -395,14 +648,16 @@ def _scan_alerts(session: Session) -> None:
         all_rows = [row for rows in minute_rows.values() for row in rows]
         allocated_gpu_count = len({row.gpu_uuid for row in all_rows})
         minute_count, avg_gpu = _avg_gpu_by_minute(minute_rows)
-        if minute_count >= 60 and allocated_gpu_count >= 4:
+        minute_span = _minute_span(minute_rows)
+        if minute_span >= 60 and minute_count >= 1 and allocated_gpu_count >= 4:
             if avg_gpu < 15:
                 active_keys.add(("user", user_name, "user_low_util"))
                 _upsert_alert(session, "user", user_name, "warning", "user_low_util", f"user {user_name} avg gpu util {avg_gpu:.2f}% in 1h")
 
     for node_name, minute_rows in node_1h.items():
         minute_count = len(minute_rows)
-        if minute_count >= 60:
+        minute_span = _minute_span(minute_rows)
+        if minute_span >= 60 and minute_count >= 1:
             low_util_gpu_uuids: set[str] = set()
             for rows in minute_rows.values():
                 for row in rows:
@@ -476,10 +731,25 @@ def ingest_heartbeat(payload: HeartbeatIn, session: Session = Depends(get_sessio
     return {"status": "ok"}
 
 
+@app.post("/api/v1/ingest/job-state")
+def ingest_job_state(payload: JobStateIn, session: Session = Depends(get_session)) -> dict[str, str]:
+    _upsert_job_meta_state(session, payload)
+    session.commit()
+    return {"status": "ok"}
+
+
 @app.get("/api/v1/overview/realtime")
 def realtime_overview(session: Session = Depends(get_session)) -> dict[str, Any]:
     since = utcnow() - timedelta(minutes=15)
-    rows = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= since)).scalars().all()
+    running_job_keys = {
+        (row.job_id, row.step_id)
+        for row in session.execute(select(JobMeta).where(JobMeta.state == "RUNNING")).scalars().all()
+    }
+    rows = [
+        row
+        for row in session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= since)).scalars().all()
+        if (row.job_id, row.step_id) in running_job_keys
+    ]
     if not rows:
         return {
             "running_job_count": 0,
@@ -502,6 +772,85 @@ def realtime_overview(session: Session = Depends(get_session)) -> dict[str, Any]
         "low_util_job_count": len(low_util_jobs),
         "active_alert_count": int(active_alert_count),
     }
+
+
+@app.get("/api/v1/debug/jobs/{job_id}")
+def debug_job(job_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    since = utcnow() - timedelta(minutes=15)
+    job_meta_rows = session.execute(
+        select(JobMeta).where(JobMeta.job_id == job_id).order_by(JobMeta.step_id.asc(), JobMeta.start_time.asc())
+    ).scalars().all()
+    recent_rows = session.execute(
+        select(GpuUsageMinute)
+        .where(GpuUsageMinute.job_id == job_id, GpuUsageMinute.ts >= since)
+        .order_by(GpuUsageMinute.ts.desc())
+    ).scalars().all()
+    running_job_keys = {
+        (row.job_id, row.step_id)
+        for row in session.execute(select(JobMeta).where(JobMeta.state == "RUNNING")).scalars().all()
+    }
+    included_recent_rows = [
+        row
+        for row in recent_rows
+        if (row.job_id, row.step_id) in running_job_keys
+    ]
+    return {
+        "job_id": job_id,
+        "debug_time": utcnow().isoformat(),
+        "realtime_window_start": since.isoformat(),
+        "job_meta": [
+            {
+                "job_id": row.job_id,
+                "step_id": row.step_id,
+                "user_name": row.user_name,
+                "uid": row.uid,
+                "state": row.state,
+                "node_list": row.node_list,
+                "gpu_count": row.gpu_count,
+                "start_time": row.start_time.isoformat() if row.start_time else None,
+                "end_time": row.end_time.isoformat() if row.end_time else None,
+            }
+            for row in job_meta_rows
+        ],
+        "running_job_keys_for_this_job": sorted(
+            [
+                {"job_id": running_job_id, "step_id": running_step_id}
+                for running_job_id, running_step_id in running_job_keys
+                if running_job_id == job_id
+            ],
+            key=lambda item: str(item["step_id"]),
+        ),
+        "recent_sample_count": len(recent_rows),
+        "recent_samples_included_in_realtime": len(included_recent_rows),
+        "recent_samples": [
+            {
+                "ts": row.ts.isoformat(),
+                "step_id": row.step_id,
+                "node_name": row.node_name,
+                "gpu_uuid": row.gpu_uuid,
+                "gpu_index": row.gpu_index,
+                "gpu_util_percent": row.gpu_util_percent,
+                "mem_util_percent": row.mem_util_percent,
+                "counted_in_realtime": (row.job_id, row.step_id) in running_job_keys,
+            }
+            for row in recent_rows[:200]
+        ],
+    }
+
+
+@app.get("/api/v1/debug/alerts/jobs/{job_id}")
+def debug_job_alerts(job_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    return _build_job_alert_debug(session, job_id)
+
+
+@app.get("/api/v1/debug/alerts/users/{user_name}")
+def debug_user_alerts(user_name: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    return _build_user_alert_debug(session, user_name)
+
+
+@app.get("/api/v1/debug/alerts/nodes/{node_name}")
+def debug_node_alerts(node_name: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    return _build_node_alert_debug(session, node_name)
 
 
 @app.get("/api/v1/jobs")
