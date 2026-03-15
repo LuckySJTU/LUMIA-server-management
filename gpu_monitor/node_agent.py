@@ -210,16 +210,44 @@ class NodeStore:
         for mapping in mappings:
             self.upsert_mapping(mapping)
 
-    def mark_job_state(self, job_id: str, step_id: str, state: str) -> None:
+    def mark_job_state(self, job_id: str, step_id: str, state: str) -> list[str]:
+        exact_step_ids = [
+            row["step_id"]
+            for row in self.connection.execute(
+                """
+                SELECT DISTINCT step_id
+                FROM active_mappings
+                WHERE job_id = ? AND step_id = ? AND state != 'CLOSED'
+                """,
+                (job_id, step_id),
+            ).fetchall()
+        ]
+        target_step_ids = exact_step_ids
+        if not target_step_ids and state in {"ENDING", "CLOSED"}:
+            target_step_ids = [
+                row["step_id"]
+                for row in self.connection.execute(
+                    """
+                    SELECT DISTINCT step_id
+                    FROM active_mappings
+                    WHERE job_id = ? AND state != 'CLOSED'
+                    """,
+                    (job_id,),
+                ).fetchall()
+            ]
+        if not target_step_ids:
+            return []
+        placeholders = ",".join("?" for _ in target_step_ids)
         self.connection.execute(
-            """
+            f"""
             UPDATE active_mappings
             SET state = ?, last_seen_time = ?
-            WHERE job_id = ? AND step_id = ?
+            WHERE job_id = ? AND step_id IN ({placeholders})
             """,
-            (state, utcnow().isoformat(), job_id, step_id),
+            [state, utcnow().isoformat(), job_id, *target_step_ids],
         )
         self.connection.commit()
+        return sorted(set(target_step_ids))
 
     def cleanup_stale_mappings(self, stale_minutes: int) -> None:
         cutoff = (utcnow() - timedelta(minutes=stale_minutes)).isoformat()
@@ -336,7 +364,9 @@ class NodeStore:
             self.replace_job_mappings(event.get("mappings", []))
             return
         if action in {"finish", "finish_alloc"}:
-            self.mark_job_state(event["job_id"], event["step_id"], event.get("state", "CLOSED"))
+            closed_step_ids = self.mark_job_state(event["job_id"], event["step_id"], event.get("state", "CLOSED"))
+            if closed_step_ids:
+                event["closed_step_ids"] = closed_step_ids
             return
         raise RuntimeError(f"Unsupported task event action: {action}")
 
@@ -545,12 +575,14 @@ def _sync_job_state_event(config: NodeConfig, event: dict[str, Any]) -> None:
         )
         return
     if action in {"finish", "finish_alloc"}:
-        _send_job_state(
-            config,
-            job_id=event["job_id"],
-            step_id=event["step_id"],
-            state=event.get("state", "CLOSED"),
-        )
+        step_ids = event.get("closed_step_ids") or [event["step_id"]]
+        for step_id in step_ids:
+            _send_job_state(
+                config,
+                job_id=event["job_id"],
+                step_id=step_id,
+                state=event.get("state", "CLOSED"),
+            )
         return
 
 
