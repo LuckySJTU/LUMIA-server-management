@@ -441,6 +441,23 @@ def _minute_span(minute_rows: dict[datetime, list[GpuUsageMinute]]) -> int:
     return int((buckets[-1] - buckets[0]).total_seconds() // 60) + 1
 
 
+def _running_job_keys(session: Session) -> set[tuple[str, str]]:
+    return {
+        (row.job_id, row.step_id)
+        for row in session.execute(select(JobMeta).where(JobMeta.state == "RUNNING")).scalars().all()
+    }
+
+
+def _latest_rows_by_mapping(rows: list[GpuUsageMinute]) -> list[GpuUsageMinute]:
+    latest_rows_by_mapping: dict[tuple[str, str, str, str], GpuUsageMinute] = {}
+    for row in rows:
+        key = (row.job_id, row.step_id, row.node_name, row.gpu_uuid)
+        existing = latest_rows_by_mapping.get(key)
+        if existing is None or row.ts > existing.ts:
+            latest_rows_by_mapping[key] = row
+    return list(latest_rows_by_mapping.values())
+
+
 def _job_runtime_minutes(session: Session, job_id: str) -> float:
     job = session.execute(
         select(JobMeta).where(JobMeta.job_id == job_id).order_by(JobMeta.start_time.asc())
@@ -562,29 +579,44 @@ def _build_user_alert_debug(session: Session, user_name: str) -> dict[str, Any]:
 
 def _build_node_alert_debug(session: Session, node_name: str) -> dict[str, Any]:
     now = utcnow()
-    rows_1h = session.execute(
+    running_job_keys = _running_job_keys(session)
+    raw_rows_1h = session.execute(
         select(GpuUsageMinute).where(GpuUsageMinute.node_name == node_name, GpuUsageMinute.ts >= now - timedelta(hours=1, minutes=1))
     ).scalars().all()
+    rows_1h = [row for row in raw_rows_1h if (row.job_id, row.step_id) in running_job_keys]
     minute_rows_1h = _group_rows_by_key_and_minute(rows_1h, lambda row: row.node_name).get(node_name, {})
     minute_count_1h = len(minute_rows_1h)
     minute_span_1h = _minute_span(minute_rows_1h)
-    low_util_gpu_uuids: set[str] = set()
+    low_util_gpu_uuids_1h: set[str] = set()
     for rows in minute_rows_1h.values():
         for row in rows:
             if row.gpu_util_percent < 10:
-                low_util_gpu_uuids.add(row.gpu_uuid)
+                low_util_gpu_uuids_1h.add(row.gpu_uuid)
+    current_rows = _latest_rows_by_mapping(rows_1h)
+    current_gpu_uuids = {row.gpu_uuid for row in current_rows}
+    current_low_util_gpu_uuids = {row.gpu_uuid for row in current_rows if row.gpu_util_percent < 10}
     active_alerts = session.execute(
         select(Alert).where(Alert.entity_type == "node", Alert.entity_id == node_name, Alert.status == "active")
     ).scalars().all()
+    rule_node_low_util_would_fire = (
+        minute_span_1h >= 60
+        and minute_count_1h >= 1
+        and len(low_util_gpu_uuids_1h) >= 2
+        and len(current_gpu_uuids) >= 1
+        and len(current_low_util_gpu_uuids) >= 2
+    )
     return {
         "node_name": node_name,
         "debug_time": now.isoformat(),
         "window_1h": {
             "minute_count": minute_count_1h,
             "minute_span": minute_span_1h,
-            "low_util_gpu_count": len(low_util_gpu_uuids),
-            "low_util_gpu_uuids": sorted(low_util_gpu_uuids),
-            "rule_node_low_util_would_fire": minute_span_1h >= 60 and minute_count_1h >= 1 and len(low_util_gpu_uuids) >= 2,
+            "low_util_gpu_count_1h": len(low_util_gpu_uuids_1h),
+            "low_util_gpu_uuids_1h": sorted(low_util_gpu_uuids_1h),
+            "current_allocated_gpu_count": len(current_gpu_uuids),
+            "current_low_util_gpu_count": len(current_low_util_gpu_uuids),
+            "current_low_util_gpu_uuids": sorted(current_low_util_gpu_uuids),
+            "rule_node_low_util_would_fire": rule_node_low_util_would_fire,
         },
         "active_alerts": [
             {
@@ -614,6 +646,7 @@ def _build_node_alert_debug(session: Session, node_name: str) -> dict[str, Any]:
 def _scan_alerts(session: Session) -> None:
     now = utcnow()
     active_keys: set[tuple[str, str, str]] = set()
+    running_job_keys = _running_job_keys(session)
     rows_30m = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(minutes=31))).scalars().all()
     rows_2h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=2, minutes=1))).scalars().all()
     rows_1h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=1, minutes=1))).scalars().all()
@@ -621,7 +654,11 @@ def _scan_alerts(session: Session) -> None:
     job_30m = _group_rows_by_key_and_minute(rows_30m, lambda row: row.job_id)
     job_2h = _group_rows_by_key_and_minute(rows_2h, lambda row: row.job_id)
     user_1h = _group_rows_by_key_and_minute(rows_1h, lambda row: row.user_name)
-    node_1h = _group_rows_by_key_and_minute(rows_1h, lambda row: row.node_name)
+    node_rows_1h = [row for row in rows_1h if (row.job_id, row.step_id) in running_job_keys]
+    node_1h = _group_rows_by_key_and_minute(node_rows_1h, lambda row: row.node_name)
+    current_node_rows_by_name: dict[str, list[GpuUsageMinute]] = {}
+    for row in _latest_rows_by_mapping(node_rows_1h):
+        current_node_rows_by_name.setdefault(row.node_name, []).append(row)
 
     for job_id, minute_rows in job_30m.items():
         minute_count, avg_gpu, avg_mem = _avg_gpu_mem_by_minute(minute_rows)
@@ -658,15 +695,24 @@ def _scan_alerts(session: Session) -> None:
         minute_count = len(minute_rows)
         minute_span = _minute_span(minute_rows)
         if minute_span >= 60 and minute_count >= 1:
-            low_util_gpu_uuids: set[str] = set()
+            low_util_gpu_uuids_1h: set[str] = set()
             for rows in minute_rows.values():
                 for row in rows:
                     if row.gpu_util_percent < 10:
-                        low_util_gpu_uuids.add(row.gpu_uuid)
-            low_util_gpu_count = len(low_util_gpu_uuids)
-            if low_util_gpu_count >= 2:
+                        low_util_gpu_uuids_1h.add(row.gpu_uuid)
+            current_rows = current_node_rows_by_name.get(node_name, [])
+            current_gpu_uuids = {row.gpu_uuid for row in current_rows}
+            current_low_util_gpu_uuids = {row.gpu_uuid for row in current_rows if row.gpu_util_percent < 10}
+            if len(low_util_gpu_uuids_1h) >= 2 and len(current_gpu_uuids) >= 1 and len(current_low_util_gpu_uuids) >= 2:
                 active_keys.add(("node", node_name, "node_low_util"))
-                _upsert_alert(session, "node", node_name, "warning", "node_low_util", f"node {node_name} has {low_util_gpu_count} low-util GPUs in 1h")
+                _upsert_alert(
+                    session,
+                    "node",
+                    node_name,
+                    "warning",
+                    "node_low_util",
+                    f"node {node_name} has {len(current_low_util_gpu_uuids)} low-util GPUs currently ({len(low_util_gpu_uuids_1h)} in 1h)",
+                )
 
     _resolve_absent_alerts(session, active_keys)
 
