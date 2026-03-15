@@ -254,7 +254,8 @@ function updateCharts() {
         data: timeline.map((point) => ({ x: point.x, y: point.gpuUtil })),
         borderColor: 'rgb(26, 86, 219)',
         backgroundColor: 'rgba(26, 86, 219, 0.18)',
-        tension: 0.28,
+        cubicInterpolationMode: 'monotone',
+        tension: 0.12,
         fill: true,
         pointRadius: gpuMonitorRange.value === '1d' ? 2 : 3
       }
@@ -270,7 +271,8 @@ function updateCharts() {
         data: timeline.map((point) => ({ x: point.x, y: point.memUtil })),
         borderColor: 'rgb(5, 150, 105)',
         backgroundColor: 'rgba(5, 150, 105, 0.18)',
-        tension: 0.28,
+        cubicInterpolationMode: 'monotone',
+        tension: 0.12,
         fill: true,
         pointRadius: gpuMonitorRange.value === '1d' ? 2 : 3
       }

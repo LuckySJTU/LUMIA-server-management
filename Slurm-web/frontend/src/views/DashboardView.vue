@@ -63,7 +63,22 @@ const gpuNodesByName = computed(
   () => new Map((gpuNodes.data.value || []).map((item) => [item.node_name, item]))
 )
 const activeAlertsCards = computed(() => {
-  return (gpuAlerts.data.value || []).map((alert) => {
+  const alerts = gpuAlerts.data.value || []
+  const criticalJobIds = new Set(
+    alerts
+      .filter((alert) => alert.entity_type === 'job' && alert.level === 'critical')
+      .map((alert) => alert.entity_id)
+  )
+
+  return alerts
+    .filter((alert) => {
+      return !(
+        alert.entity_type === 'job' &&
+        alert.level === 'warning' &&
+        criticalJobIds.has(alert.entity_id)
+      )
+    })
+    .map((alert) => {
     if (alert.entity_type === 'job') {
       const job = gpuJobsById.value.get(alert.entity_id)
       return {
@@ -104,7 +119,7 @@ const activeAlertsCards = computed(() => {
       subtitle: 'Node name',
       detail: node?.node_name || alert.entity_id
     }
-  })
+    })
 })
 
 watch(
@@ -131,8 +146,11 @@ watch(
         >Unable to retrieve statistics from cluster
         <span class="font-medium">{{ cluster }}</span></ErrorAlert
       >
+      <div v-else class="mb-4 px-1">
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Overview</h2>
+        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Total cluster resources</p>
+      </div>
       <div
-        v-else
         class="grid grid-cols-2 gap-px bg-gray-200 md:grid-cols-3 xl:grid-cols-6 dark:bg-gray-700"
       >
         <div class="bg-white px-4 py-6 sm:px-6 lg:px-8 dark:bg-gray-900">
