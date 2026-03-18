@@ -4,6 +4,8 @@ import argparse
 import json
 import logging
 import os
+import shlex
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -249,8 +251,33 @@ class NodeStore:
         self.connection.commit()
         return sorted(set(target_step_ids))
 
-    def cleanup_stale_mappings(self, stale_minutes: int) -> None:
+    def cleanup_stale_mappings(self, stale_minutes: int) -> list[dict[str, Any]]:
         cutoff = (utcnow() - timedelta(minutes=stale_minutes)).isoformat()
+        stale_rows = self.connection.execute(
+            """
+            SELECT job_id, step_id, node_name, user_name, uid, gpu_uuid
+            FROM active_mappings
+            WHERE state != 'CLOSED' AND last_seen_time < ?
+            """,
+            (cutoff,),
+        ).fetchall()
+        if not stale_rows:
+            return []
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in stale_rows:
+            key = (row["job_id"], row["step_id"])
+            bucket = grouped.setdefault(
+                key,
+                {
+                    "job_id": row["job_id"],
+                    "step_id": row["step_id"],
+                    "node_name": row["node_name"],
+                    "user_name": row["user_name"],
+                    "uid": int(row["uid"]),
+                    "gpu_uuids": set(),
+                },
+            )
+            bucket["gpu_uuids"].add(row["gpu_uuid"])
         self.connection.execute(
             """
             UPDATE active_mappings
@@ -260,6 +287,72 @@ class NodeStore:
             (cutoff,),
         )
         self.connection.commit()
+        return [
+            {
+                "job_id": value["job_id"],
+                "step_id": value["step_id"],
+                "node_name": value["node_name"],
+                "user_name": value["user_name"],
+                "uid": value["uid"],
+                "gpu_count": len(value["gpu_uuids"]),
+            }
+            for value in grouped.values()
+        ]
+
+    def reconcile_mappings_with_active_jobs(self, active_job_ids: set[str]) -> list[dict[str, Any]]:
+        open_rows = self.connection.execute(
+            """
+            SELECT job_id, step_id, node_name, user_name, uid, gpu_uuid
+            FROM active_mappings
+            WHERE state != 'CLOSED'
+            """
+        ).fetchall()
+        if not open_rows:
+            return []
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in open_rows:
+            if row["job_id"] in active_job_ids:
+                continue
+            key = (row["job_id"], row["step_id"])
+            bucket = grouped.setdefault(
+                key,
+                {
+                    "job_id": row["job_id"],
+                    "step_id": row["step_id"],
+                    "node_name": row["node_name"],
+                    "user_name": row["user_name"],
+                    "uid": int(row["uid"]),
+                    "gpu_uuids": set(),
+                },
+            )
+            bucket["gpu_uuids"].add(row["gpu_uuid"])
+        if not grouped:
+            return []
+        target_keys = list(grouped.keys())
+        placeholders = ",".join("(?, ?)" for _ in target_keys)
+        parameters: list[Any] = [utcnow().isoformat()]
+        for job_id, step_id in target_keys:
+            parameters.extend([job_id, step_id])
+        self.connection.execute(
+            f"""
+            UPDATE active_mappings
+            SET state = 'CLOSED', last_seen_time = ?
+            WHERE state != 'CLOSED' AND (job_id, step_id) IN ({placeholders})
+            """,
+            parameters,
+        )
+        self.connection.commit()
+        return [
+            {
+                "job_id": value["job_id"],
+                "step_id": value["step_id"],
+                "node_name": value["node_name"],
+                "user_name": value["user_name"],
+                "uid": value["uid"],
+                "gpu_count": len(value["gpu_uuids"]),
+            }
+            for value in grouped.values()
+        ]
 
     def get_running_mappings(self) -> list[sqlite3.Row]:
         cursor = self.connection.execute(
@@ -460,7 +553,28 @@ def build_mapping_from_env(config: NodeConfig, provider: NVMLProvider, source_mo
     return entries
 
 
+def _write_task_event(
+    config: NodeConfig,
+    *,
+    action: str,
+    payload: dict[str, Any],
+    job_id: str,
+    step_id: str,
+) -> Path:
+    config.task_event_dir.mkdir(parents=True, exist_ok=True)
+    event_path = config.task_event_dir / (
+        f"gpu-monitor-event-{action}-"
+        f"{job_id}-"
+        f"{step_id}-"
+        f"{os.getpid()}-{int(time.time() * 1000)}.json"
+    )
+    event_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+    return event_path
+
+
 def emit_task_event(config: NodeConfig, provider: NVMLProvider, action: str) -> Path:
+    job_id = os.getenv("SLURM_JOB_ID", "unknown")
+    step_id = os.getenv("SLURM_STEP_ID", "batch")
     if action == "register":
         payload: dict[str, Any] = {
             "action": "register",
@@ -496,16 +610,44 @@ def emit_task_event(config: NodeConfig, provider: NVMLProvider, action: str) -> 
     else:
         raise RuntimeError(f"Unsupported task event action: {action}")
 
-    config.task_event_dir.mkdir(parents=True, exist_ok=True)
-    event_path = config.task_event_dir / (
-        f"gpu-monitor-event-{action}-"
-        f"{os.getenv('SLURM_JOB_ID', 'unknown')}-"
-        f"{os.getenv('SLURM_STEP_ID', 'batch')}-"
-        f"{os.getpid()}-{int(time.time() * 1000)}.json"
+    return _write_task_event(
+        config,
+        action=action,
+        payload=payload,
+        job_id=job_id,
+        step_id=step_id,
     )
-    event_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
-    # LOGGER.info("wrote task event file %s", event_path)
-    return event_path
+
+
+def emit_close_event(
+    config: NodeConfig,
+    *,
+    job_id: str,
+    step_id: str,
+    node_name: str,
+    user_name: str,
+    uid: int,
+    gpu_count: int,
+    source: str,
+) -> Path:
+    payload = {
+        "action": "finish",
+        "job_id": job_id,
+        "step_id": step_id,
+        "state": "CLOSED",
+        "node_name": node_name,
+        "user_name": user_name,
+        "uid": uid,
+        "gpu_count": gpu_count,
+        "source": source,
+    }
+    return _write_task_event(
+        config,
+        action="finish",
+        payload=payload,
+        job_id=job_id,
+        step_id=step_id,
+    )
 
 
 def process_task_events(config: NodeConfig, store: NodeStore) -> int:
@@ -522,6 +664,67 @@ def process_task_events(config: NodeConfig, store: NodeStore) -> int:
         except Exception:
             LOGGER.exception("failed to process task event file %s", event_path)
     return processed
+
+
+def enqueue_stale_close_events(config: NodeConfig, stale_closures: list[dict[str, Any]]) -> int:
+    queued = 0
+    for stale_closure in stale_closures:
+        emit_close_event(
+            config,
+            job_id=stale_closure["job_id"],
+            step_id=stale_closure["step_id"],
+            node_name=stale_closure["node_name"],
+            user_name=stale_closure["user_name"],
+            uid=int(stale_closure["uid"]),
+            gpu_count=int(stale_closure["gpu_count"]),
+            source="stale_cleanup",
+        )
+        queued += 1
+    return queued
+
+
+def _fetch_node_slurm_active_job_ids(config: NodeConfig) -> set[str] | None:
+    if not config.slurm_reconcile_enabled:
+        return None
+    command_text = config.slurm_active_jobs_command.replace("{node_name}", config.node_name)
+    command = shlex.split(command_text)
+    if not command:
+        LOGGER.warning("skip node Slurm reconcile because GPU_MONITOR_NODE_SLURM_ACTIVE_JOBS_COMMAND is empty")
+        return None
+    if shutil.which(command[0]) is None:
+        LOGGER.warning("skip node Slurm reconcile because command is unavailable: %s", command[0])
+        return None
+    try:
+        output = subprocess.check_output(
+            command,
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=config.slurm_command_timeout_seconds,
+        )
+    except Exception:
+        LOGGER.exception("failed to fetch node Slurm jobs using command: %s", command_text)
+        return None
+    return {
+        line.strip()
+        for line in output.splitlines()
+        if line.strip()
+    }
+
+
+def reconcile_local_mappings_with_slurm(config: NodeConfig, store: NodeStore) -> int:
+    active_job_ids = _fetch_node_slurm_active_job_ids(config)
+    if active_job_ids is None:
+        return 0
+    slurm_closures = store.reconcile_mappings_with_active_jobs(active_job_ids)
+    if not slurm_closures:
+        return 0
+    queued = enqueue_stale_close_events(config, slurm_closures)
+    LOGGER.warning(
+        "closed %s local job steps based on Slurm reconcile and queued %s close events",
+        len(slurm_closures),
+        queued,
+    )
+    return len(slurm_closures)
 
 
 def _send_job_state(
@@ -685,15 +888,29 @@ def run_agent(config: NodeConfig) -> None:
     store = NodeStore(config)
     last_flush = 0.0
     last_heartbeat = 0.0
+    last_slurm_reconcile = 0.0
     while True:
         started = time.time()
         try:
             event_count = process_task_events(config, store)
             if event_count:
                 LOGGER.info("processed %s task events", event_count)
+            if (
+                config.slurm_reconcile_enabled
+                and started - last_slurm_reconcile >= config.slurm_reconcile_interval_seconds
+            ):
+                reconcile_local_mappings_with_slurm(config, store)
+                last_slurm_reconcile = started
             sample_count = capture_samples(config, store, provider)
             LOGGER.info("captured %s samples", sample_count)
-            store.cleanup_stale_mappings(config.mapping_stale_minutes)
+            stale_closures = store.cleanup_stale_mappings(config.mapping_stale_minutes)
+            if stale_closures:
+                queued_stale_events = enqueue_stale_close_events(config, stale_closures)
+                LOGGER.warning(
+                    "closed %s stale job steps locally and queued %s close events for controller sync",
+                    len(stale_closures),
+                    queued_stale_events,
+                )
             if started - last_flush >= config.flush_interval_seconds:
                 accepted, rejected = flush_samples(config, store)
                 LOGGER.info("flushed samples accepted=%s rejected=%s", accepted, rejected)

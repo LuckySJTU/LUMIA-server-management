@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
+import logging
+import shlex
+import shutil
+import subprocess
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,10 +15,13 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import JSON, DateTime, Float, Integer, String, create_engine, delete, func, select
+from sqlalchemy import JSON, BigInteger, DateTime, Float, Integer, String, create_engine, delete, func, insert, select, text, tuple_
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from gpu_monitor.shared import ControllerConfig, utcnow
+
+
+LOGGER = logging.getLogger("gpu_monitor.controller_app")
 
 
 class Base(DeclarativeBase):
@@ -49,8 +58,8 @@ class GpuUsageMinute(Base):
     gpu_uuid: Mapped[str] = mapped_column(String(128), index=True)
     gpu_index: Mapped[int] = mapped_column(Integer)
     gpu_util_percent: Mapped[float] = mapped_column(Float)
-    mem_used_bytes: Mapped[int] = mapped_column(Integer)
-    mem_total_bytes: Mapped[int] = mapped_column(Integer)
+    mem_used_bytes: Mapped[int] = mapped_column(BigInteger)
+    mem_total_bytes: Mapped[int] = mapped_column(BigInteger)
     mem_util_percent: Mapped[float] = mapped_column(Float)
 
 
@@ -166,7 +175,21 @@ if config.database_url.startswith("sqlite"):
     sqlite_path = config.database_url.removeprefix("sqlite+pysqlite:///")
     Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
 connect_args = {"check_same_thread": False} if config.database_url.startswith("sqlite") else {}
-engine = create_engine(config.database_url, future=True, connect_args=connect_args)
+engine_kwargs: dict[str, Any] = {
+    "future": True,
+    "connect_args": connect_args,
+}
+if config.database_url.startswith("sqlite"):
+    engine_kwargs["pool_pre_ping"] = False
+else:
+    engine_kwargs.update(
+        pool_pre_ping=True,
+        pool_size=config.db_pool_size,
+        max_overflow=config.db_max_overflow,
+        pool_timeout=config.db_pool_timeout_seconds,
+        pool_recycle=config.db_pool_recycle_seconds,
+    )
+engine = create_engine(config.database_url, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 
@@ -177,6 +200,48 @@ def get_session() -> Session:
 
 def _ensure_schema() -> None:
     Base.metadata.create_all(engine)
+    _apply_schema_compatibility_fixes()
+
+
+def _apply_schema_compatibility_fixes() -> None:
+    if engine.dialect.name != "postgresql":
+        return
+    bigint_columns = {
+        "gpu_usage_minute": ("mem_used_bytes", "mem_total_bytes"),
+    }
+    with engine.begin() as connection:
+        for table_name, column_names in bigint_columns.items():
+            for column_name in column_names:
+                data_type = connection.execute(
+                    text(
+                        """
+                        SELECT data_type
+                        FROM information_schema.columns
+                        WHERE table_schema = current_schema()
+                          AND table_name = :table_name
+                          AND column_name = :column_name
+                        """
+                    ),
+                    {
+                        "table_name": table_name,
+                        "column_name": column_name,
+                    },
+                ).scalar_one_or_none()
+                if data_type is None:
+                    continue
+                if data_type.lower() == "bigint":
+                    continue
+                LOGGER.info(
+                    "altering %s.%s from %s to bigint for PostgreSQL compatibility",
+                    table_name,
+                    column_name,
+                    data_type,
+                )
+                connection.execute(
+                    text(
+                        f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" TYPE BIGINT'
+                    )
+                )
 
 
 def _parse_range(range_name: str) -> tuple[datetime, datetime]:
@@ -198,51 +263,96 @@ def _as_utc(dt: datetime | None) -> datetime | None:
     return dt
 
 
-def _compute_job_meta_stats(session: Session, job_id: str, step_id: str) -> tuple[list[str], int]:
-    node_list = sorted(
-        session.execute(
-            select(GpuUsageMinute.node_name)
-            .where(GpuUsageMinute.job_id == job_id, GpuUsageMinute.step_id == step_id)
-            .distinct()
-        ).scalars().all()
-    )
-    gpu_count = len(
-        session.execute(
-            select(GpuUsageMinute.gpu_uuid)
-            .where(GpuUsageMinute.job_id == job_id, GpuUsageMinute.step_id == step_id)
-            .distinct()
-        ).scalars().all()
-    )
-    return node_list, gpu_count
-
-
-def _upsert_job_meta(session: Session, sample: MetricSampleIn) -> None:
-    node_list, gpu_count = _compute_job_meta_stats(session, sample.job_id, sample.step_id)
-    existing = session.execute(
-        select(JobMeta).where(JobMeta.job_id == sample.job_id, JobMeta.step_id == sample.step_id)
-    ).scalar_one_or_none()
-    if existing is None:
-        session.add(
-            JobMeta(
-                job_id=sample.job_id,
-                step_id=sample.step_id,
-                user_name=sample.user_name,
-                uid=sample.uid,
-                state="RUNNING",
-                node_list=node_list or [sample.node_name],
-                gpu_count=gpu_count or 1,
-                start_time=sample.ts,
-            )
+def _collect_job_meta_batch_stats(
+    session: Session,
+    job_keys: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[list[str], int]]:
+    if not job_keys:
+        return {}
+    rows = session.execute(
+        select(
+            GpuUsageMinute.job_id,
+            GpuUsageMinute.step_id,
+            GpuUsageMinute.node_name,
+            GpuUsageMinute.gpu_uuid,
         )
+        .where(tuple_(GpuUsageMinute.job_id, GpuUsageMinute.step_id).in_(job_keys))
+        .distinct()
+    ).all()
+    grouped: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for job_id, step_id, node_name, gpu_uuid in rows:
+        bucket = grouped.setdefault((job_id, step_id), {"nodes": set(), "gpus": set()})
+        bucket["nodes"].add(node_name)
+        bucket["gpus"].add(gpu_uuid)
+    return {
+        key: (sorted(value["nodes"]), len(value["gpus"]))
+        for key, value in grouped.items()
+    }
+
+
+def _upsert_job_meta_batch(session: Session, samples: list[MetricSampleIn]) -> None:
+    if not samples:
         return
-    existing.node_list = node_list
-    existing.gpu_count = gpu_count
-    sample_ts = _as_utc(sample.ts)
-    existing_end_time = _as_utc(existing.end_time)
-    if existing.state == "CLOSED" and existing_end_time is not None and sample_ts is not None and sample_ts <= existing_end_time:
-        return
-    existing.state = "RUNNING"
-    existing.end_time = None
+    grouped_samples: dict[tuple[str, str], dict[str, Any]] = {}
+    for sample in samples:
+        key = (sample.job_id, sample.step_id)
+        bucket = grouped_samples.setdefault(
+            key,
+            {
+                "job_id": sample.job_id,
+                "step_id": sample.step_id,
+                "user_name": sample.user_name,
+                "uid": sample.uid,
+                "node_name": sample.node_name,
+                "min_ts": sample.ts,
+                "max_ts": sample.ts,
+            },
+        )
+        if sample.ts < bucket["min_ts"]:
+            bucket["min_ts"] = sample.ts
+        if sample.ts > bucket["max_ts"]:
+            bucket["max_ts"] = sample.ts
+        bucket["user_name"] = sample.user_name
+        bucket["uid"] = sample.uid
+        bucket["node_name"] = sample.node_name
+
+    job_keys = list(grouped_samples.keys())
+    stats_by_key = _collect_job_meta_batch_stats(session, job_keys)
+    existing_rows = session.execute(
+        select(JobMeta).where(tuple_(JobMeta.job_id, JobMeta.step_id).in_(job_keys))
+    ).scalars().all()
+    existing_by_key = {
+        (row.job_id, row.step_id): row
+        for row in existing_rows
+    }
+
+    for key, bucket in grouped_samples.items():
+        node_list, gpu_count = stats_by_key.get(key, ([bucket["node_name"]], 0))
+        existing = existing_by_key.get(key)
+        if existing is None:
+            session.add(
+                JobMeta(
+                    job_id=bucket["job_id"],
+                    step_id=bucket["step_id"],
+                    user_name=bucket["user_name"],
+                    uid=bucket["uid"],
+                    state="RUNNING",
+                    node_list=node_list or [bucket["node_name"]],
+                    gpu_count=gpu_count or 1,
+                    start_time=bucket["min_ts"],
+                )
+            )
+            continue
+        existing.node_list = node_list
+        existing.gpu_count = gpu_count
+        sample_ts = _as_utc(bucket["max_ts"])
+        existing_end_time = _as_utc(existing.end_time)
+        if existing.state == "CLOSED" and existing_end_time is not None and sample_ts is not None and sample_ts <= existing_end_time:
+            continue
+        existing.user_name = bucket["user_name"]
+        existing.uid = bucket["uid"]
+        existing.state = "RUNNING"
+        existing.end_time = None
 
 
 def _upsert_job_meta_state(session: Session, payload: JobStateIn) -> None:
@@ -472,12 +582,16 @@ def _job_runtime_minutes(session: Session, job_id: str) -> float:
 
 def _build_job_alert_debug(session: Session, job_id: str) -> dict[str, Any]:
     now = utcnow()
-    rows_30m = session.execute(
+    running_job_keys = _running_job_keys(session)
+    job_is_running = any(running_job_id == job_id for running_job_id, _ in running_job_keys)
+    raw_rows_30m = session.execute(
         select(GpuUsageMinute).where(GpuUsageMinute.job_id == job_id, GpuUsageMinute.ts >= now - timedelta(minutes=31))
     ).scalars().all()
-    rows_2h = session.execute(
+    raw_rows_2h = session.execute(
         select(GpuUsageMinute).where(GpuUsageMinute.job_id == job_id, GpuUsageMinute.ts >= now - timedelta(hours=2, minutes=1))
     ).scalars().all()
+    rows_30m = [row for row in raw_rows_30m if (row.job_id, row.step_id) in running_job_keys]
+    rows_2h = [row for row in raw_rows_2h if (row.job_id, row.step_id) in running_job_keys]
     minute_rows_30m = _group_rows_by_key_and_minute(rows_30m, lambda row: row.job_id).get(job_id, {})
     minute_rows_2h = _group_rows_by_key_and_minute(rows_2h, lambda row: row.job_id).get(job_id, {})
     minute_count_30m, avg_gpu_30m, avg_mem_30m = _avg_gpu_mem_by_minute(minute_rows_30m)
@@ -491,20 +605,21 @@ def _build_job_alert_debug(session: Session, job_id: str) -> dict[str, Any]:
     return {
         "job_id": job_id,
         "debug_time": now.isoformat(),
+        "job_is_running": job_is_running,
         "runtime_minutes": round(runtime_minutes, 2),
         "window_30m": {
             "minute_count": minute_count_30m,
             "minute_span": minute_span_30m,
             "avg_gpu_util_percent": round(avg_gpu_30m, 4),
             "avg_mem_util_percent": round(avg_mem_30m, 4),
-            "rule_low_util_30m_would_fire": runtime_minutes >= 30 and minute_span_30m >= 30 and minute_count_30m >= 1 and avg_gpu_30m < 10,
-            "rule_high_mem_low_gpu_would_fire": runtime_minutes >= 30 and minute_span_30m >= 30 and minute_count_30m >= 1 and avg_mem_30m > 60 and avg_gpu_30m < 10,
+            "rule_low_util_30m_would_fire": job_is_running and runtime_minutes >= 30 and minute_span_30m >= 30 and minute_count_30m >= 1 and avg_gpu_30m < 10,
+            "rule_high_mem_low_gpu_would_fire": job_is_running and runtime_minutes >= 30 and minute_span_30m >= 30 and minute_count_30m >= 1 and avg_mem_30m > 60 and avg_gpu_30m < 10,
         },
         "window_2h": {
             "minute_count": minute_count_2h,
             "minute_span": minute_span_2h,
             "avg_gpu_util_percent": round(avg_gpu_2h, 4),
-            "rule_low_util_2h_would_fire": runtime_minutes >= 120 and minute_span_2h >= 120 and minute_count_2h >= 1 and avg_gpu_2h < 5,
+            "rule_low_util_2h_would_fire": job_is_running and runtime_minutes >= 120 and minute_span_2h >= 120 and minute_count_2h >= 1 and avg_gpu_2h < 5,
         },
         "active_alerts": [
             {
@@ -532,9 +647,11 @@ def _build_job_alert_debug(session: Session, job_id: str) -> dict[str, Any]:
 
 def _build_user_alert_debug(session: Session, user_name: str) -> dict[str, Any]:
     now = utcnow()
-    rows_1h = session.execute(
+    running_job_keys = _running_job_keys(session)
+    raw_rows_1h = session.execute(
         select(GpuUsageMinute).where(GpuUsageMinute.user_name == user_name, GpuUsageMinute.ts >= now - timedelta(hours=1, minutes=1))
     ).scalars().all()
+    rows_1h = [row for row in raw_rows_1h if (row.job_id, row.step_id) in running_job_keys]
     minute_rows_1h = _group_rows_by_key_and_minute(rows_1h, lambda row: row.user_name).get(user_name, {})
     minute_count_1h, avg_gpu_1h = _avg_gpu_by_minute(minute_rows_1h)
     minute_span_1h = _minute_span(minute_rows_1h)
@@ -647,14 +764,18 @@ def _scan_alerts(session: Session) -> None:
     now = utcnow()
     active_keys: set[tuple[str, str, str]] = set()
     running_job_keys = _running_job_keys(session)
-    rows_30m = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(minutes=31))).scalars().all()
-    rows_2h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=2, minutes=1))).scalars().all()
-    rows_1h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=1, minutes=1))).scalars().all()
+    raw_rows_30m = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(minutes=31))).scalars().all()
+    raw_rows_2h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=2, minutes=1))).scalars().all()
+    raw_rows_1h = session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= now - timedelta(hours=1, minutes=1))).scalars().all()
+
+    rows_30m = [row for row in raw_rows_30m if (row.job_id, row.step_id) in running_job_keys]
+    rows_2h = [row for row in raw_rows_2h if (row.job_id, row.step_id) in running_job_keys]
+    rows_1h = [row for row in raw_rows_1h if (row.job_id, row.step_id) in running_job_keys]
 
     job_30m = _group_rows_by_key_and_minute(rows_30m, lambda row: row.job_id)
     job_2h = _group_rows_by_key_and_minute(rows_2h, lambda row: row.job_id)
     user_1h = _group_rows_by_key_and_minute(rows_1h, lambda row: row.user_name)
-    node_rows_1h = [row for row in rows_1h if (row.job_id, row.step_id) in running_job_keys]
+    node_rows_1h = rows_1h
     node_1h = _group_rows_by_key_and_minute(node_rows_1h, lambda row: row.node_name)
     current_node_rows_by_name: dict[str, list[GpuUsageMinute]] = {}
     for row in _latest_rows_by_mapping(node_rows_1h):
@@ -723,19 +844,89 @@ def _cleanup_retention(session: Session) -> None:
     session.execute(delete(Alert).where(Alert.start_time < now - timedelta(days=config.hourly_retention_days)))
 
 
+def _fetch_slurm_active_job_ids() -> set[str] | None:
+    if not config.slurm_reconcile_enabled:
+        return None
+    command = shlex.split(config.slurm_active_jobs_command)
+    if not command:
+        LOGGER.warning("skip Slurm reconcile because GPU_MONITOR_SLURM_ACTIVE_JOBS_COMMAND is empty")
+        return None
+    if shutil.which(command[0]) is None:
+        LOGGER.warning("skip Slurm reconcile because command is unavailable: %s", command[0])
+        return None
+    try:
+        output = subprocess.check_output(
+            command,
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=config.slurm_command_timeout_seconds,
+        )
+    except Exception:
+        LOGGER.exception("failed to fetch active Slurm jobs using command: %s", config.slurm_active_jobs_command)
+        return None
+    return {
+        line.strip()
+        for line in output.splitlines()
+        if line.strip()
+    }
+
+
+def _reconcile_closed_jobs_with_slurm(session: Session) -> int:
+    active_job_ids = _fetch_slurm_active_job_ids()
+    if active_job_ids is None:
+        return 0
+    candidates = session.execute(select(JobMeta).where(JobMeta.state != "CLOSED")).scalars().all()
+    if not candidates:
+        return 0
+    now = utcnow()
+    reconciled = 0
+    for job_meta in candidates:
+        if job_meta.job_id in active_job_ids:
+            continue
+        job_meta.state = "CLOSED"
+        job_meta.end_time = now
+        reconciled += 1
+    if reconciled:
+        LOGGER.warning(
+            "reconciled %s non-closed job_meta rows to CLOSED based on Slurm active job list",
+            reconciled,
+        )
+    return reconciled
+
+
+def _run_worker_cycle(*, run_slurm_reconcile: bool) -> None:
+    with SessionLocal() as session:
+        if run_slurm_reconcile:
+            _reconcile_closed_jobs_with_slurm(session)
+        _refresh_hourly_tables(session)
+        _scan_alerts(session)
+        _cleanup_retention(session)
+        session.commit()
+
+
 async def _worker_loop() -> None:
+    last_slurm_reconcile = 0.0
     while True:
-        with SessionLocal() as session:
-            _refresh_hourly_tables(session)
-            _scan_alerts(session)
-            _cleanup_retention(session)
-            session.commit()
+        try:
+            started = time.monotonic()
+            should_run_slurm_reconcile = (
+                config.slurm_reconcile_enabled
+                and started - last_slurm_reconcile >= config.slurm_reconcile_interval_seconds
+            )
+            _run_worker_cycle(run_slurm_reconcile=should_run_slurm_reconcile)
+            if should_run_slurm_reconcile:
+                last_slurm_reconcile = started
+        except Exception:
+            LOGGER.exception("controller worker cycle failed")
         await asyncio.sleep(config.worker_interval_seconds)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _ensure_schema()
+    if not config.enable_embedded_worker:
+        yield
+        return
     task = asyncio.create_task(_worker_loop())
     try:
         yield
@@ -750,17 +941,24 @@ app = FastAPI(title="GPU Monitor API", version="1.0.0", lifespan=lifespan)
 
 @app.post("/api/v1/ingest/metrics")
 def ingest_metrics(payload: MetricBatchIn, session: Session = Depends(get_session)) -> dict[str, Any]:
-    accepted_count = 0
-    rejected_count = 0
-    for sample in payload.samples:
-        if sample.node_name != payload.node_name:
-            rejected_count += 1
-            continue
-        session.add(GpuUsageMinute(**sample.model_dump()))
-        _upsert_job_meta(session, sample)
-        accepted_count += 1
+    accepted_samples = [
+        sample
+        for sample in payload.samples
+        if sample.node_name == payload.node_name
+    ]
+    rejected_count = len(payload.samples) - len(accepted_samples)
+    if accepted_samples:
+        session.execute(
+            insert(GpuUsageMinute),
+            [sample.model_dump() for sample in accepted_samples],
+        )
+        _upsert_job_meta_batch(session, accepted_samples)
     session.commit()
-    return {"accepted_count": accepted_count, "rejected_count": rejected_count, "server_time": utcnow().isoformat()}
+    return {
+        "accepted_count": len(accepted_samples),
+        "rejected_count": rejected_count,
+        "server_time": utcnow().isoformat(),
+    }
 
 
 @app.post("/api/v1/ingest/heartbeat")
@@ -1155,10 +1353,27 @@ def list_alerts(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="GPU monitor controller API and background worker")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("run-api", "run-worker"),
+        default="run-api",
+    )
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    if args.command == "run-worker":
+        _ensure_schema()
+        try:
+            asyncio.run(_worker_loop())
+        except KeyboardInterrupt:
+            LOGGER.info("controller worker stopped")
+        return
+
     import uvicorn
 
     _ensure_schema()
-    uvicorn.run("gpu_monitor.controller_app:app", host=config.api_host, port=config.api_port, reload=False)
+    uvicorn.run(app, host=config.api_host, port=config.api_port, reload=False)
 
 
 if __name__ == "__main__":

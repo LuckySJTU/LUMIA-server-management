@@ -33,6 +33,10 @@ class NodeConfig:
     task_event_dir: Path = Path(os.getenv("GPU_MONITOR_TASK_EVENT_DIR", "/tmp"))
     undelivered_retention_hours: int = int(os.getenv("GPU_MONITOR_UNDELIVERED_RETENTION_HOURS", "24"))
     undelivered_max_records: int = int(os.getenv("GPU_MONITOR_UNDELIVERED_MAX_RECORDS", "100000"))
+    slurm_reconcile_enabled: bool = env_bool("GPU_MONITOR_NODE_SLURM_RECONCILE_ENABLED", True)
+    slurm_reconcile_interval_seconds: int = int(os.getenv("GPU_MONITOR_NODE_SLURM_RECONCILE_INTERVAL_SECONDS", "300"))
+    slurm_active_jobs_command: str = os.getenv("GPU_MONITOR_NODE_SLURM_ACTIVE_JOBS_COMMAND", "squeue -h -w {node_name} -o %A")
+    slurm_command_timeout_seconds: int = int(os.getenv("GPU_MONITOR_NODE_SLURM_COMMAND_TIMEOUT_SECONDS", "15"))
 
 
 @dataclass(slots=True)
@@ -47,3 +51,12 @@ class ControllerConfig:
     minute_retention_days: int = int(os.getenv("GPU_MONITOR_MINUTE_RETENTION_DAYS", "7"))
     hourly_retention_days: int = int(os.getenv("GPU_MONITOR_HOURLY_RETENTION_DAYS", "30"))
     worker_interval_seconds: int = int(os.getenv("GPU_MONITOR_WORKER_INTERVAL_SECONDS", "60"))
+    enable_embedded_worker: bool = env_bool("GPU_MONITOR_ENABLE_EMBEDDED_WORKER", True)
+    db_pool_size: int = int(os.getenv("GPU_MONITOR_DB_POOL_SIZE", "10"))
+    db_max_overflow: int = int(os.getenv("GPU_MONITOR_DB_MAX_OVERFLOW", "20"))
+    db_pool_timeout_seconds: int = int(os.getenv("GPU_MONITOR_DB_POOL_TIMEOUT_SECONDS", "30"))
+    db_pool_recycle_seconds: int = int(os.getenv("GPU_MONITOR_DB_POOL_RECYCLE_SECONDS", "1800"))
+    slurm_reconcile_enabled: bool = env_bool("GPU_MONITOR_SLURM_RECONCILE_ENABLED", True)
+    slurm_reconcile_interval_seconds: int = int(os.getenv("GPU_MONITOR_SLURM_RECONCILE_INTERVAL_SECONDS", "300"))
+    slurm_active_jobs_command: str = os.getenv("GPU_MONITOR_SLURM_ACTIVE_JOBS_COMMAND", "squeue -h -o %A")
+    slurm_command_timeout_seconds: int = int(os.getenv("GPU_MONITOR_SLURM_COMMAND_TIMEOUT_SECONDS", "15"))

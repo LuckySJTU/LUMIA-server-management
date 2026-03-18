@@ -28,7 +28,7 @@
 
 ## 一期能力
 
-- 基于 `TaskProlog/TaskEpilog` + 节点 agent 事件消费维护 job-user-node-gpu 映射
+- 基于 `Prolog/Epilog` + shell fallback + 节点 agent 事件消费维护 job-user-node-gpu 映射
 - 节点端每 15 秒采集活跃 GPU 的 `gpu_util_percent` / `mem_used_bytes` / `mem_total_bytes` / `mem_util_percent`
 - 节点端用 SQLite WAL 做本地缓存，控制节点不可达时保留最近 2 小时未送达样本
   - 当前默认已调整为保留最近 24 小时未送达样本
@@ -44,7 +44,7 @@
   - `GET /api/v1/nodes`
   - `GET /api/v1/nodes/{node_name}`
   - `GET /api/v1/alerts`
-- 控制节点内置后台 worker：
+- 控制节点后台 worker：
   - 小时聚合
   - retention 清理
   - 低利用率告警扫描
@@ -66,109 +66,123 @@ pip install -r gpu_monitor/requirements.txt
 
 ### 1. 配置环境变量
 
-最少需要：
+汇总节点现在按 PostgreSQL 部署，数据库用户和库需要提前创建好。最少需要：
 
 ```bash
 export PYTHONPATH=/home/yxwang/LUMIA-server-management
-export GPU_MONITOR_DATABASE_URL="sqlite+pysqlite:////home/yxwang/LUMIA-server-management/gpu_monitor/controller/gpu-monitor.db"
+export GPU_MONITOR_DATABASE_URL="postgresql+psycopg://gpu_monitor:password@127.0.0.1:5432/gpu_monitor"
 export GPU_MONITOR_API_HOST="0.0.0.0"
-export GPU_MONITOR_API_PORT="8000"
+export GPU_MONITOR_API_PORT="8001"
 export GPU_MONITOR_CLUSTER_NAME="lumia"
+export GPU_MONITOR_ENABLE_EMBEDDED_WORKER="false"
+export GPU_MONITOR_DB_POOL_SIZE="20"
+export GPU_MONITOR_DB_MAX_OVERFLOW="40"
+export GPU_MONITOR_DB_POOL_TIMEOUT_SECONDS="30"
+export GPU_MONITOR_DB_POOL_RECYCLE_SECONDS="1800"
+export GPU_MONITOR_SLURM_RECONCILE_ENABLED="true"
+export GPU_MONITOR_SLURM_RECONCILE_INTERVAL_SECONDS="300"
+export GPU_MONITOR_SLURM_ACTIVE_JOBS_COMMAND="squeue -h -o %A"
+export GPU_MONITOR_SLURM_COMMAND_TIMEOUT_SECONDS="15"
 ```
 
-如果要切换 PostgreSQL，可直接把 `GPU_MONITOR_DATABASE_URL` 改成：
+说明：
 
-```bash
-export GPU_MONITOR_DATABASE_URL="postgresql+psycopg://user:password@127.0.0.1:5432/gpu_monitor"
-```
+- `gpu_monitor.controller_app` 现在支持 `run-api` 和 `run-worker` 两种启动模式
+- 若只做本地开发，仍可把 `GPU_MONITOR_DATABASE_URL` 设回 SQLite；下面的 systemd 方案按 PostgreSQL 给出
+- `GPU_MONITOR_ENABLE_EMBEDDED_WORKER=false` 用于关闭 API 进程里的内置 worker，避免和独立 worker 服务重复执行聚合与告警扫描
+- `GPU_MONITOR_DB_POOL_*` 用于调节 PostgreSQL 连接池；在多节点同时批量上报时可以适当调大
+- `GPU_MONITOR_SLURM_RECONCILE_*` 用于控制汇总节点的低频 Slurm 对账：如果某个 job 已不在 Slurm 活跃列表里，但控制端还没收到 `CLOSED`，worker 会把它补关并在同一轮告警扫描里解析掉对应 active alerts
 
 ### 2. 启动 API
 
 ```bash
 cd /home/yxwang/LUMIA-server-management
 source .venv/bin/activate
-python3 -m gpu_monitor.controller_app
+python3 -m gpu_monitor.controller_app run-api
+```
+
+### 3. 启动 worker
+
+```bash
+cd /home/yxwang/LUMIA-server-management
+source .venv/bin/activate
+python3 -m gpu_monitor.controller_app run-worker
 ```
 
 默认监听：
 
-- `http://127.0.0.1:8000`
+- `http://127.0.0.1:8001`
 
 本地访问示例：
 
 ```bash
-curl http://127.0.0.1:8000/api/v1/overview/realtime
-curl http://127.0.0.1:8000/api/v1/jobs?range=1d
-curl http://127.0.0.1:8000/api/v1/alerts
+curl http://127.0.0.1:8001/api/v1/overview/realtime
+curl http://127.0.0.1:8001/api/v1/jobs?range=1d
+curl http://127.0.0.1:8001/api/v1/alerts
 ```
 
-### 3. systemd 示例
+### 4. systemd 示例
 
-可在汇总节点创建 `/etc/systemd/system/gpu-monitor-api.service`：
+仓库里已提供：
 
-```ini
-[Unit]
-Description=GPU Monitor API
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/home/yxwang/LUMIA-server-management
-Environment=PYTHONPATH=/home/yxwang/LUMIA-server-management
-Environment=GPU_MONITOR_DATABASE_URL=sqlite+pysqlite:////home/yxwang/LUMIA-server-management/gpu_monitor/controller/gpu-monitor.db
-Environment=GPU_MONITOR_API_HOST=0.0.0.0
-Environment=GPU_MONITOR_API_PORT=8000
-Environment=GPU_MONITOR_CLUSTER_NAME=lumia
-ExecStart=/home/yxwang/LUMIA-server-management/.venv/bin/python3 -m gpu_monitor.controller_app
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+- [gpu-monitor-api.service](/home/yxwang/LUMIA-server-management/gpu_monitor/systemd/gpu-monitor-api.service)
+- [gpu-monitor-worker.service](/home/yxwang/LUMIA-server-management/gpu_monitor/systemd/gpu-monitor-worker.service)
+- [controller.env.example](/home/yxwang/LUMIA-server-management/gpu_monitor/systemd/controller.env.example)
 
 启用方式：
 
 ```bash
+mkdir -p /etc/gpu-monitor
+cp /home/yxwang/LUMIA-server-management/gpu_monitor/systemd/controller.env.example /etc/gpu-monitor/controller.env
+$EDITOR /etc/gpu-monitor/controller.env
+
+cp /home/yxwang/LUMIA-server-management/gpu_monitor/systemd/gpu-monitor-api.service /etc/systemd/system/
+cp /home/yxwang/LUMIA-server-management/gpu_monitor/systemd/gpu-monitor-worker.service /etc/systemd/system/
+
 systemctl daemon-reload
-systemctl enable --now gpu-monitor-api.service
+systemctl enable --now gpu-monitor-api.service gpu-monitor-worker.service
 ```
 
 ## 计算节点部署
 
 ### 1. 配置环境变量
 
-最少需要：
+agent 侧仍然继续使用本地 SQLite，这是当前设计里用于断点续传和本地状态恢复的缓存层。最少需要：
 
 ```bash
 export PYTHONPATH=/home/yxwang/LUMIA-server-management
 export GPU_MONITOR_CLUSTER_NAME="lumia"
 export GPU_MONITOR_NODE_NAME="$(hostname -s)"
 export GPU_MONITOR_NODE_DB="/var/lib/gpu-monitor/node-agent.db"
-export GPU_MONITOR_API_BASE_URL="http://<汇总节点IP>:8000"
+export GPU_MONITOR_TASK_EVENT_DIR="/var/lib/gpu-monitor/events"
+export GPU_MONITOR_API_BASE_URL="http://<汇总节点IP>:8001"
 export GPU_MONITOR_SAMPLE_INTERVAL_SECONDS="15"
 export GPU_MONITOR_FLUSH_INTERVAL_SECONDS="60"
 export GPU_MONITOR_HEARTBEAT_INTERVAL_SECONDS="300"
 export GPU_MONITOR_MAPPING_STALE_MINUTES="10"
 export GPU_MONITOR_UNDELIVERED_RETENTION_HOURS="24"
 export GPU_MONITOR_UNDELIVERED_MAX_RECORDS="100000"
-export GPU_MONITOR_WORKER_INTERVAL_SECONDS="60"
+export GPU_MONITOR_NODE_SLURM_RECONCILE_ENABLED="true"
+export GPU_MONITOR_NODE_SLURM_RECONCILE_INTERVAL_SECONDS="300"
+export GPU_MONITOR_NODE_SLURM_ACTIVE_JOBS_COMMAND="squeue -h -w {node_name} -o %A"
+export GPU_MONITOR_NODE_SLURM_COMMAND_TIMEOUT_SECONDS="15"
 ```
 
 说明：
 
+- `GPU_MONITOR_NODE_DB` 是计算节点本地 SQLite 缓存文件，继续保留即可
+- `GPU_MONITOR_TASK_EVENT_DIR` 用于存放 Slurm hook 写入的事件文件，建议使用持久目录而不是默认 `/tmp`
 - `GPU_MONITOR_MAPPING_STALE_MINUTES` 用于兜底清理异常残留映射
+- `GPU_MONITOR_NODE_SLURM_RECONCILE_*` 用于控制计算节点低频 Slurm 对账；当本地仍有 RUNNING mapping，但该 job 已不在本节点的 Slurm 活跃列表中时，会先本地补关，再补写一个可重试的 `CLOSED` 事件同步控制端
 - 正常运行中的任务会在每轮采样时自动刷新 `last_seen_time`
-- 如果 agent 挂掉、任务异常结束或事件丢失，超过该时间的映射会被自动标记为 `CLOSED`
+- 如果 agent 挂掉、任务异常结束或事件丢失，超过该时间的映射会被自动标记为 `CLOSED`，并补写一个可重试的 close 事件用于同步控制节点
 - `GPU_MONITOR_UNDELIVERED_RETENTION_HOURS` 控制控制节点不可达时，本地未上报样本的最长保留时间
 - `GPU_MONITOR_UNDELIVERED_MAX_RECORDS` 控制本地未上报队列的上限
-- `GPU_MONITOR_WORKER_INTERVAL_SECONDS` 控制控制节点聚合、告警扫描、清理任务的执行周期
 
 重启影响说明：
 
-- `gpu-monitor-api` 重启：分钟数据、小时聚合和告警都在数据库中，短时重启不会丢历史数据；计算节点会继续把样本缓存在本地 SQLite，API 恢复后再补传
-- `gpu-monitor-agent` 重启：本地 `active_mappings` 和 `sample_queue` 都在 SQLite 中，重启后会继续恢复；当前实现会先处理 task 事件并尝试采样，再做 stale 清理，避免把仍在运行的长任务误判为 `CLOSED`
+- `gpu-monitor-api` / `gpu-monitor-worker` 重启：分钟数据、小时聚合和告警都在 PostgreSQL 中，短时重启不会丢历史数据；计算节点会继续把样本缓存在本地 SQLite，API 恢复后再补传
+- `gpu-monitor-agent` 重启：本地 `active_mappings` 和 `sample_queue` 都在 SQLite 中，重启后会继续恢复；当前实现会先处理 task 事件，再做一次低频 Slurm 对账，然后尝试采样，最后再做 stale 清理，尽量避免把仍在运行的长任务误判为 `CLOSED`
 - 只有当控制节点持续不可达时间超过 `GPU_MONITOR_UNDELIVERED_RETENTION_HOURS`，或未送达样本数超过 `GPU_MONITOR_UNDELIVERED_MAX_RECORDS` 时，才会开始丢弃最旧的未送达数据
 
 ### 2. 启动节点 agent
@@ -181,34 +195,20 @@ python3 -m gpu_monitor.node_agent run-agent
 
 ### 3. systemd 示例
 
-在计算节点创建 `/etc/systemd/system/gpu-monitor-agent.service`：
+仓库里已提供：
 
-```ini
-[Unit]
-Description=GPU Monitor Agent
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/home/yxwang/LUMIA-server-management
-Environment=PYTHONPATH=/home/yxwang/LUMIA-server-management
-Environment=GPU_MONITOR_CLUSTER_NAME=lumia
-Environment=GPU_MONITOR_NODE_NAME=%H
-Environment=GPU_MONITOR_NODE_DB=/var/lib/gpu-monitor/node-agent.db
-Environment=GPU_MONITOR_API_BASE_URL=http://<汇总节点IP>:8000
-ExecStart=/home/yxwang/LUMIA-server-management/.venv/bin/python3 -m gpu_monitor.node_agent run-agent
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+- [gpu-monitor-agent.service](/home/yxwang/LUMIA-server-management/gpu_monitor/systemd/gpu-monitor-agent.service)
+- [agent.env.example](/home/yxwang/LUMIA-server-management/gpu_monitor/systemd/agent.env.example)
 
 启用方式：
 
 ```bash
-mkdir -p /var/lib/gpu-monitor
+mkdir -p /etc/gpu-monitor /var/lib/gpu-monitor
+cp /home/yxwang/LUMIA-server-management/gpu_monitor/systemd/agent.env.example /etc/gpu-monitor/agent.env
+$EDITOR /etc/gpu-monitor/agent.env
+
+cp /home/yxwang/LUMIA-server-management/gpu_monitor/systemd/gpu-monitor-agent.service /etc/systemd/system/
+
 systemctl daemon-reload
 systemctl enable --now gpu-monitor-agent.service
 ```
@@ -261,7 +261,7 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 - `TaskProlog/TaskEpilog` 当前保留为占位脚本，不再做映射登记
 - `Prolog` 调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-alloc-register-event`
 - `Epilog` 调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-alloc-finish-event`
-- 节点 agent 消费这些事件后，会调用控制节点 `/api/v1/ingest/job-state` 同步作业 `RUNNING/CLOSED` 状态
+- 节点 agent 消费这些事件后，会调用控制节点 `/api/v1/ingest/job-state` 同步作业 `RUNNING/CLOSED` 状态；如果某个映射是被 stale 清理兜底关闭，agent 也会补写一个 `CLOSED` 事件并按同样链路重试同步
 
 脚本会读取：
 
@@ -337,7 +337,7 @@ fi
 - 只对普通用户生效，不对 `root` 生效
 - 只在 Slurm 作业环境中执行
 - 只在交互 shell 中执行，避免影响非交互命令
-- 由于 `slurm_shell_register.sh` 会在检测到 `SLURM_STEP_ID` 时自动跳过，因此不会与 `sbatch` / `srun` / `TaskProlog` 的任务级登记冲突
+- 由于 `slurm_shell_register.sh` 会在检测到 `SLURM_STEP_ID` 时自动跳过，因此不会与 `sbatch` / `srun` 已存在的 allocation / step 注册链路冲突
 - `bash` 用户通常走 `/etc/profile.d/*.sh`
 - `zsh` 用户通常走 `/etc/zsh/zprofile`
 
@@ -345,7 +345,7 @@ fi
 
 - `SLURM_REAL_GPUS`
 
-如果计算节点已经提供 `/usr/local/bin/get_real_gpu_id`，`slurm_task_prolog.sh` 会先执行它并导出 `SLURM_REAL_GPUS`。
+如果计算节点已经提供 `/usr/local/bin/get_real_gpu_id`，`node_agent.py` 和 `slurm_shell_register.sh` 都会优先尝试使用它解析真实 GPU 编号并导出 `SLURM_REAL_GPUS`。
 
 随后才会回退到：
 
@@ -450,8 +450,8 @@ fi
 ## 实现说明与边界
 
 - 节点采集依赖 `pynvml`，底层调用 NVML
-- 当前版本默认使用 SQLite 以便快速本地部署；配置 `GPU_MONITOR_DATABASE_URL` 后可切换到 PostgreSQL
-- 小时聚合与告警扫描内置在 API 进程中，方便一期落地；后续可拆分成独立 worker
+- 生产部署建议控制节点使用 PostgreSQL；本地开发仍可通过 `GPU_MONITOR_DATABASE_URL` 切回 SQLite
+- 小时聚合与告警扫描既可作为 API 进程内嵌 worker 运行，也可通过 `run-worker` 单独部署成 systemd 服务
 - 一期未覆盖 MIG、MPS、多任务共享同一张 GPU 的精细归因
 - `SLURM_JOB_GPUS` 默认按 `0,1,2` 这样的物理 GPU index 解析；如果集群里变量格式不同，需要按实际 Slurm 输出格式调整 `build_mapping_from_env`
 
@@ -466,7 +466,7 @@ fi
 ### 1. 验证汇总节点
 
 ```bash
-curl http://127.0.0.1:8000/api/v1/overview/realtime
+curl http://127.0.0.1:8001/api/v1/overview/realtime
 ```
 
 ### 1.1 调试单个任务的实时统计状态
@@ -474,7 +474,7 @@ curl http://127.0.0.1:8000/api/v1/overview/realtime
 如果发现任务在计算节点已经 `CLOSED`，但控制节点实时总览仍把它算作 `running_job_count`，可以调用调试接口：
 
 ```bash
-curl http://127.0.0.1:8000/api/v1/debug/jobs/<job_id>
+curl http://127.0.0.1:8001/api/v1/debug/jobs/<job_id>
 ```
 
 这个接口会返回：
@@ -493,7 +493,7 @@ curl http://127.0.0.1:8000/api/v1/debug/jobs/<job_id>
 
 当前实现中：
 
-- `TaskEpilog` 产生的 `CLOSED` 事件如果同步控制节点失败，不会再立即删除事件文件，agent 后续会继续重试
+- `Epilog` 产生的 `CLOSED` 事件如果同步控制节点失败，不会再立即删除事件文件，agent 后续会继续重试
 - 控制节点收到迟到的旧分钟样本时，不会再把已 `CLOSED` 的 `job_meta` 重新改回 `RUNNING`
 
 ### 1.2 调试单个任务为什么没有触发告警
@@ -501,7 +501,7 @@ curl http://127.0.0.1:8000/api/v1/debug/jobs/<job_id>
 如果怀疑某个任务应该触发告警，但控制节点没有生成 `alerts` 记录，可以调用：
 
 ```bash
-curl http://127.0.0.1:8000/api/v1/debug/alerts/jobs/<job_id>
+curl http://127.0.0.1:8001/api/v1/debug/alerts/jobs/<job_id>
 ```
 
 这个接口会返回：
@@ -531,7 +531,7 @@ curl http://127.0.0.1:8000/api/v1/debug/alerts/jobs/<job_id>
 如果要定位某个用户为什么出现或没有出现 `user_low_util` 告警，可以调用：
 
 ```bash
-curl http://127.0.0.1:8000/api/v1/debug/alerts/users/<user_name>
+curl http://127.0.0.1:8001/api/v1/debug/alerts/users/<user_name>
 ```
 
 这个接口会返回：
@@ -548,7 +548,7 @@ curl http://127.0.0.1:8000/api/v1/debug/alerts/users/<user_name>
 如果要定位某个节点为什么出现或没有出现 `node_low_util` 告警，可以调用：
 
 ```bash
-curl http://127.0.0.1:8000/api/v1/debug/alerts/nodes/<node_name>
+curl http://127.0.0.1:8001/api/v1/debug/alerts/nodes/<node_name>
 ```
 
 这个接口会返回：
@@ -584,7 +584,5 @@ sqlite3 /var/lib/gpu-monitor/node-agent.db "select count(*) from sample_queue;"
 
 ## 后续建议
 
-- 若要接生产，优先把控制节点数据库切到 PostgreSQL
 - 为 API 增加鉴权，例如 token 或节点白名单
-- 将 worker 从 API 进程拆出成单独服务
 - 为 `SLURM_JOB_GPUS` 的不同格式补更完整的解析器

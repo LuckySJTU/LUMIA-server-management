@@ -1,0 +1,22 @@
+[Unit]
+Description=GPU Monitor API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/yxwang/LUMIA-server-management
+Environment=PYTHONPATH=/home/yxwang/LUMIA-server-management
+EnvironmentFile=-/etc/gpu-monitor/controller.env
+Environment=GPU_MONITOR_ENABLE_EMBEDDED_WORKER=false
+ExecStart=/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python3 -m gpu_monitor.controller_app run-api
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
