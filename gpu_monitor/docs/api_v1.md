@@ -550,10 +550,10 @@ GET /api/v1/alerts?status=active&entity_type=job
 
 ## 7. 重启与数据持久化
 
-### 7.1 控制节点 `gpu-monitor-api` 重启
+### 7.1 控制节点 `gpu-monitor-api` / `gpu-monitor-worker` 重启
 
 - 控制节点分钟数据、小时聚合、告警都保存在数据库中
-- API 进程重启不会清空这些数据
+- API 或 worker 进程重启都不会清空这些数据
 - 计算节点在 API 不可达时，会把未送达样本保存在本地 SQLite 队列中
 - API 恢复后，agent 会继续补传
 
