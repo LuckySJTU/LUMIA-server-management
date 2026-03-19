@@ -13,7 +13,8 @@ EnvironmentFile=-/etc/gpu-monitor/agent.env
 Environment=GPU_MONITOR_NODE_NAME=%H
 Environment=GPU_MONITOR_NODE_DB=/var/lib/gpu-monitor/node-agent.db
 Environment=GPU_MONITOR_TASK_EVENT_DIR=/var/lib/gpu-monitor/events
-ExecStartPre=/usr/bin/mkdir -p /var/lib/gpu-monitor/events
+ExecStartPre=/usr/bin/install -d -m 0755 /var/lib/gpu-monitor
+ExecStartPre=/usr/bin/install -d -m 1777 /var/lib/gpu-monitor/events
 ExecStart=/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python3 -m gpu_monitor.node_agent run-agent
 Restart=always
 RestartSec=5

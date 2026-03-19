@@ -28,7 +28,7 @@
 
 ## 一期能力
 
-- 基于 `Prolog/Epilog` + shell fallback + 节点 agent 事件消费维护 job-user-node-gpu 映射
+- 基于 `Prolog/Epilog` + `TaskProlog/TaskEpilog` + shell fallback + 节点 agent 事件消费维护 job-user-node-gpu 映射
 - 节点端每 15 秒采集活跃 GPU 的 `gpu_util_percent` / `mem_used_bytes` / `mem_total_bytes` / `mem_util_percent`
 - 节点端用 SQLite WAL 做本地缓存，控制节点不可达时保留最近 2 小时未送达样本
   - 当前默认已调整为保留最近 24 小时未送达样本
@@ -172,6 +172,7 @@ export GPU_MONITOR_NODE_SLURM_COMMAND_TIMEOUT_SECONDS="15"
 
 - `GPU_MONITOR_NODE_DB` 是计算节点本地 SQLite 缓存文件，继续保留即可
 - `GPU_MONITOR_TASK_EVENT_DIR` 用于存放 Slurm hook 写入的事件文件，建议使用持久目录而不是默认 `/tmp`
+- Slurm hook 进程和 `gpu-monitor-agent` 必须看到同一个 `GPU_MONITOR_TASK_EVENT_DIR`；如果 agent 走 systemd 且启用了 `PrivateTmp=true`，就不能再依赖默认 `/tmp`
 - `GPU_MONITOR_MAPPING_STALE_MINUTES` 用于兜底清理异常残留映射
 - `GPU_MONITOR_NODE_SLURM_RECONCILE_*` 用于控制计算节点低频 Slurm 对账；当本地仍有 RUNNING mapping，但该 job 已不在本节点的 Slurm 活跃列表中时，会先本地补关，再补写一个可重试的 `CLOSED` 事件同步控制端
 - 正常运行中的任务会在每轮采样时自动刷新 `last_seen_time`
@@ -258,9 +259,10 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 ### 2. hook 的行为
 
 - `Prolog/Epilog` 负责 allocation 级别事件，用于支持 `sbatch` / `salloc` 这类资源分配场景
-- `TaskProlog/TaskEpilog` 当前保留为占位脚本，不再做映射登记
+- `TaskProlog/TaskEpilog` 负责 `sbatch` / `srun` 这类 task 级别事件
 - `Prolog` 调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-alloc-register-event`
 - `Epilog` 调用 `${GPU_MONITOR_PYTHON:-python3} -m gpu_monitor.node_agent emit-alloc-finish-event`
+- 这些 hook 会优先读取 `/etc/gpu-monitor/agent.env`，并默认把事件写到 `/var/lib/gpu-monitor/events`
 - 节点 agent 消费这些事件后，会调用控制节点 `/api/v1/ingest/job-state` 同步作业 `RUNNING/CLOSED` 状态；如果某个映射是被 stale 清理兜底关闭，agent 也会补写一个 `CLOSED` 事件并按同样链路重试同步
 
 脚本会读取：
@@ -279,8 +281,11 @@ export GPU_MONITOR_PYTHON="/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python
 
 - 纯 `salloc` 只建立 allocation，不一定马上触发 task 级 hook
 - 为了捕获这类“已占用但未启动 task”的 GPU 资源，建议启用 `PrologFlags=Alloc`
-- 当前实现里，`Prolog/Epilog` 负责 allocation 级事件；`TaskProlog/TaskEpilog` 已停用，避免重复登记
+- 当前实现里，`Prolog/Epilog` 负责 allocation 级事件；`TaskProlog/TaskEpilog` 负责 task 级事件；shell fallback 只兜底纯 `salloc` 顶层 shell
+- 如果某个 job 先留下了 `allocation_register` 或 `shell_register` 这类非 task 占位映射，后续同一 `job_id` 下出现真实 task 注册时，agent 会优先把这些非 task 映射补关，只保留 `task_register`
+- 如果 `register_alloc` 事件晚于 `task_register` 才被 agent 处理，会被直接忽略，不再把 allocation 占位重新打回 `RUNNING`
 - 如果 `Prolog` 环境拿不到 GPU 编号，可以使用用户 shell 兜底上报
+- 若 `TaskProlog/TaskEpilog` 是按普通作业用户执行，则 `GPU_MONITOR_TASK_EVENT_DIR` 需要对作业用户可写；systemd 示例里已把 `/var/lib/gpu-monitor/events` 设为 `1777`
 
 用户 shell 兜底方式：
 
@@ -291,7 +296,7 @@ source /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_shell_register.sh
 这个脚本会：
 
 - 检查当前是否处于 Slurm 作业环境
-- 只在没有 `SLURM_STEP_ID` 的顶层 allocation shell 中执行，用于 `salloc` 兜底
+- 只在交互式、且没有 task 级特征、且当前 job 还没有 task step marker 的顶层 allocation shell 中执行，用于 `salloc` 兜底
 - 调用 `/usr/local/bin/get_real_gpu_id` 生成 `SLURM_REAL_GPUS`
 - 通过 `emit-shell-register-event` 把当前 shell 的真实 GPU 分配上报给节点 agent
 - 使用 `GPU_MONITOR_SHELL_REGISTERED=1` 防止同一个 shell 重复上报

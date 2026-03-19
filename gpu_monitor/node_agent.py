@@ -131,6 +131,7 @@ class NodeStore:
                 gpu_index INTEGER NOT NULL,
                 start_time TEXT NOT NULL,
                 last_seen_time TEXT NOT NULL,
+                mapping_source TEXT NOT NULL DEFAULT 'task_register',
                 state TEXT NOT NULL,
                 UNIQUE(job_id, step_id, node_name, gpu_uuid)
             );
@@ -155,6 +156,14 @@ class NodeStore:
             CREATE INDEX IF NOT EXISTS idx_sample_queue_delivered ON sample_queue(delivered, ts);
             """
         )
+        active_mapping_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(active_mappings)").fetchall()
+        }
+        if "mapping_source" not in active_mapping_columns:
+            self.connection.execute(
+                "ALTER TABLE active_mappings ADD COLUMN mapping_source TEXT NOT NULL DEFAULT 'task_register'"
+            )
         self.connection.commit()
 
     def upsert_mapping(self, mapping: dict[str, Any]) -> None:
@@ -163,14 +172,15 @@ class NodeStore:
             """
             INSERT INTO active_mappings (
                 cluster_name, job_id, step_id, user_name, uid, node_name, gpu_uuid, gpu_index,
-                start_time, last_seen_time, state
+                start_time, last_seen_time, mapping_source, state
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id, step_id, node_name, gpu_uuid) DO UPDATE SET
                 user_name=excluded.user_name,
                 uid=excluded.uid,
                 gpu_index=excluded.gpu_index,
                 last_seen_time=excluded.last_seen_time,
+                mapping_source=excluded.mapping_source,
                 state=excluded.state
             """,
             (
@@ -184,6 +194,7 @@ class NodeStore:
                 int(mapping["gpu_index"]),
                 mapping["start_time"],
                 now,
+                mapping.get("mapping_source", "task_register"),
                 mapping["state"],
             ),
         )
@@ -198,7 +209,8 @@ class NodeStore:
             """
             UPDATE active_mappings
             SET state = 'CLOSED', last_seen_time = ?
-            WHERE job_id = ? AND step_id = ? AND node_name = ? AND state != 'CLOSED' AND gpu_uuid NOT IN ({placeholders})
+            WHERE job_id = ? AND step_id = ? AND node_name = ? AND state != 'CLOSED'
+              AND mapping_source != 'task_register' AND gpu_uuid NOT IN ({placeholders})
             """.format(placeholders=",".join("?" for _ in desired_gpu_uuids)),
             [
                 utcnow().isoformat(),
@@ -250,6 +262,43 @@ class NodeStore:
         )
         self.connection.commit()
         return sorted(set(target_step_ids))
+
+    def close_non_task_mappings_for_job(self, job_id: str) -> list[str]:
+        step_rows = self.connection.execute(
+            """
+            SELECT DISTINCT step_id
+            FROM active_mappings
+            WHERE job_id = ? AND state != 'CLOSED' AND mapping_source != 'task_register'
+            """,
+            (job_id,),
+        ).fetchall()
+        if not step_rows:
+            return []
+        step_ids = [row["step_id"] for row in step_rows]
+        placeholders = ",".join("?" for _ in step_ids)
+        self.connection.execute(
+            f"""
+            UPDATE active_mappings
+            SET state = 'CLOSED', last_seen_time = ?
+            WHERE job_id = ? AND state != 'CLOSED' AND mapping_source != 'task_register'
+              AND step_id IN ({placeholders})
+            """,
+            [utcnow().isoformat(), job_id, *step_ids],
+        )
+        self.connection.commit()
+        return sorted(set(step_ids))
+
+    def has_open_task_mappings(self, job_id: str) -> bool:
+        row = self.connection.execute(
+            """
+            SELECT 1
+            FROM active_mappings
+            WHERE job_id = ? AND state != 'CLOSED' AND mapping_source = 'task_register'
+            LIMIT 1
+            """,
+            (job_id,),
+        ).fetchone()
+        return row is not None
 
     def cleanup_stale_mappings(self, stale_minutes: int) -> list[dict[str, Any]]:
         cutoff = (utcnow() - timedelta(minutes=stale_minutes)).isoformat()
@@ -449,12 +498,47 @@ class NodeStore:
 
     def process_task_event(self, event: dict[str, Any]) -> None:
         action = event.get("action")
-        if action in {"register", "register_alloc"}:
-            for mapping in event.get("mappings", []):
+        if action == "register_alloc":
+            mappings = event.get("mappings", [])
+            if not mappings:
+                return
+            first = mappings[0]
+            if self.has_open_task_mappings(first["job_id"]):
+                LOGGER.info(
+                    "ignore allocation register event because task mappings already exist; job_id=%s step_id=%s",
+                    first["job_id"],
+                    first["step_id"],
+                )
+                event["skip_job_state_sync"] = True
+                return
+            for mapping in mappings:
                 self.upsert_mapping(mapping)
             return
+        if action == "register":
+            mappings = event.get("mappings", [])
+            if not mappings:
+                return
+            for mapping in mappings:
+                self.upsert_mapping(mapping)
+            first = mappings[0]
+            closed_step_ids = self.close_non_task_mappings_for_job(first["job_id"])
+            if closed_step_ids:
+                event["closed_step_ids"] = closed_step_ids
+            return
         if action == "register_shell":
-            self.replace_job_mappings(event.get("mappings", []))
+            mappings = event.get("mappings", [])
+            if not mappings:
+                return
+            first = mappings[0]
+            if self.has_open_task_mappings(first["job_id"]):
+                LOGGER.info(
+                    "ignore shell register event because task mappings already exist; job_id=%s step_id=%s",
+                    first["job_id"],
+                    first["step_id"],
+                )
+                event["skip_job_state_sync"] = True
+                return
+            self.replace_job_mappings(mappings)
             return
         if action in {"finish", "finish_alloc"}:
             closed_step_ids = self.mark_job_state(event["job_id"], event["step_id"], event.get("state", "CLOSED"))
@@ -481,6 +565,7 @@ def build_mapping_from_env(config: NodeConfig, provider: NVMLProvider, source_mo
         gpu_indices = _parse_gpu_index_list(raw_slurm_gpus)
         gpu_pairs = [(gpu_index, gpu_index) for gpu_index in gpu_indices]
         gpu_source = "slurm_allocation"
+        mapping_source = "allocation_register"
     elif source_mode == "shell_real":
         if not raw_real_gpus:
             raise RuntimeError("No GPU list found in SLURM_REAL_GPUS for shell event")
@@ -495,6 +580,7 @@ def build_mapping_from_env(config: NodeConfig, provider: NVMLProvider, source_mo
             )
         gpu_pairs = list(zip(real_gpu_indices, visible_nvml_indices))
         gpu_source = "shell_real"
+        mapping_source = "shell_register"
     elif raw_real_gpus:
         real_gpu_indices = _parse_gpu_index_list(raw_real_gpus)
         visible_nvml_indices = provider.visible_indices()
@@ -507,14 +593,17 @@ def build_mapping_from_env(config: NodeConfig, provider: NVMLProvider, source_mo
             )
         gpu_pairs = list(zip(real_gpu_indices, visible_nvml_indices))
         gpu_source = "real"
+        mapping_source = "task_register"
     elif raw_visible_gpus:
         gpu_indices = _parse_gpu_index_list(raw_visible_gpus)
         gpu_pairs = [(gpu_index, gpu_index) for gpu_index in gpu_indices]
         gpu_source = "visible"
+        mapping_source = "task_register"
     elif raw_slurm_gpus:
         gpu_indices = _parse_gpu_index_list(raw_slurm_gpus)
         gpu_pairs = [(gpu_index, gpu_index) for gpu_index in gpu_indices]
         gpu_source = "slurm"
+        mapping_source = "task_register"
     else:
         raise RuntimeError(
             "No GPU list found in SLURM_REAL_GPUS / CUDA_VISIBLE_DEVICES / GPU_DEVICE_ORDINAL / SLURM_STEP_GPUS / SLURM_JOB_GPUS"
@@ -547,6 +636,7 @@ def build_mapping_from_env(config: NodeConfig, provider: NVMLProvider, source_mo
                 "gpu_uuid": gpu_uuid,
                 "gpu_index": real_gpu_index,
                 "start_time": start_time,
+                "mapping_source": mapping_source,
                 "state": "RUNNING",
             }
         )
@@ -570,6 +660,19 @@ def _write_task_event(
     )
     event_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
     return event_path
+
+
+def _event_sort_key(event_path: Path) -> tuple[int, str]:
+    parts = event_path.stem.rsplit("-", 2)
+    if len(parts) >= 2:
+        try:
+            return (int(parts[-1]), event_path.name)
+        except ValueError:
+            pass
+    try:
+        return (int(event_path.stat().st_mtime_ns), event_path.name)
+    except FileNotFoundError:
+        return (0, event_path.name)
 
 
 def emit_task_event(config: NodeConfig, provider: NVMLProvider, action: str) -> Path:
@@ -652,7 +755,9 @@ def emit_close_event(
 
 def process_task_events(config: NodeConfig, store: NodeStore) -> int:
     processed = 0
-    for event_path in sorted(config.task_event_dir.glob("gpu-monitor-event-*.json")):
+    event_paths = list(config.task_event_dir.glob("gpu-monitor-event-*.json"))
+    event_paths.sort(key=_event_sort_key)
+    for event_path in event_paths:
         try:
             event = json.loads(event_path.read_text(encoding="utf-8"))
             store.process_task_event(event)
@@ -760,6 +865,8 @@ def _send_job_state(
 
 
 def _sync_job_state_event(config: NodeConfig, event: dict[str, Any]) -> None:
+    if event.get("skip_job_state_sync"):
+        return
     action = event.get("action")
     if action in {"register", "register_alloc", "register_shell"}:
         mappings = event.get("mappings", [])
@@ -776,6 +883,16 @@ def _sync_job_state_event(config: NodeConfig, event: dict[str, Any]) -> None:
             uid=int(first["uid"]),
             gpu_count=len({mapping["gpu_uuid"] for mapping in mappings}),
         )
+        for closed_step_id in event.get("closed_step_ids", []):
+            if closed_step_id == first["step_id"]:
+                continue
+            _send_job_state(
+                config,
+                job_id=first["job_id"],
+                step_id=closed_step_id,
+                state="CLOSED",
+                node_name=first.get("node_name"),
+            )
         return
     if action in {"finish", "finish_alloc"}:
         step_ids = event.get("closed_step_ids") or [event["step_id"]]

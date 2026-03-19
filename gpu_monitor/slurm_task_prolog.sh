@@ -1,5 +1,31 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
-# TaskProlog 映射登记已停用，避免与 allocation/shell 注册链路重复。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${SCRIPT_DIR}/..:${PYTHONPATH:-}"
+if [[ -r /etc/gpu-monitor/agent.env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source /etc/gpu-monitor/agent.env
+    set +a
+fi
+PYTHON_BIN="${GPU_MONITOR_PYTHON:-/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python3}"
+export PYTHON_BIN
+export GPU_MONITOR_NODE_NAME="${GPU_MONITOR_NODE_NAME:-$(hostname -s)}"
+export GPU_MONITOR_NODE_DB="${GPU_MONITOR_NODE_DB:-/var/lib/gpu-monitor/node-agent.db}"
+export GPU_MONITOR_TASK_EVENT_DIR="${GPU_MONITOR_TASK_EVENT_DIR:-/var/lib/gpu-monitor/events}"
+STEP_MARKER_PATH="${GPU_MONITOR_TASK_EVENT_DIR}/gpu-monitor-step-active-${SLURM_JOB_ID:-unknown}-${SLURM_STEP_ID:-batch}.marker"
+
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+    exit 0
+fi
+
+# TaskProlog 负责 sbatch / srun 这类 task 级别的映射登记。
+# 如果监控脚本失败，不应影响 Slurm 作业本身启动。
+mkdir -p "${GPU_MONITOR_TASK_EVENT_DIR}"
+: > "${STEP_MARKER_PATH}"
+if ! "${PYTHON_BIN}" -m gpu_monitor.node_agent emit-register-event; then
+    echo "gpu_monitor TaskProlog register failed: job_id=${SLURM_JOB_ID} step_id=${SLURM_STEP_ID:-batch}" >&2
+fi
+
 exit 0
