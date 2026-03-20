@@ -37,6 +37,7 @@
   - `POST /api/v1/ingest/metrics`
   - `POST /api/v1/ingest/heartbeat`
   - `GET /api/v1/overview/realtime`
+  - `GET /api/v1/overview/history`
   - `GET /api/v1/jobs`
   - `GET /api/v1/jobs/{job_id}`
   - `GET /api/v1/users`
@@ -427,6 +428,7 @@ fi
 ### 查询接口
 
 - `GET /api/v1/overview/realtime`
+- `GET /api/v1/overview/history?range=7d|30d`
 - `GET /api/v1/jobs?range=realtime|1d|1w`
 - `GET /api/v1/jobs/{job_id}?range=1d|1w`
 - `GET /api/v1/users?range=realtime|1d|1w`
@@ -465,6 +467,8 @@ fi
 - `GET /api/v1/overview/realtime` 只统计控制节点当前标记为 `RUNNING` 的作业
 - 该接口会在最近 15 分钟窗口内，为每个 `job_id + step_id + node_name + gpu_uuid` 只取最新一条样本作为当前快照
 - `allocated_gpu_count`、`avg_gpu_util_percent`、`avg_mem_util_percent`、`low_util_job_count` 都基于这个当前快照计算
+- worker 会每 5 分钟把这一组 realtime 指标固化到 `overview_snapshot`
+- `GET /api/v1/overview/history` 返回最近 `7d` 或 `30d` 的 5 分钟快照序列，字段与 `overview/realtime` 保持一致
 
 ## 验证建议
 
@@ -472,6 +476,7 @@ fi
 
 ```bash
 curl http://127.0.0.1:8001/api/v1/overview/realtime
+curl http://127.0.0.1:8001/api/v1/overview/history?range=7d
 ```
 
 ### 1.1 调试单个任务的实时统计状态

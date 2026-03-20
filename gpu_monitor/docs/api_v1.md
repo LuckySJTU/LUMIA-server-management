@@ -205,7 +205,48 @@
 - `low_util_job_count`：当前快照里存在低利用率 GPU 的作业数
 - `active_alert_count`：当前 active 告警数
 
-## 3.2 GET /api/v1/jobs
+## 3.2 GET /api/v1/overview/history
+
+返回最近 `7d` 或 `30d` 的 5 分钟概览快照序列。
+
+### 查询参数
+
+- `range`
+  - 可选，默认 `7d`
+  - 取值：`7d` | `30d`
+
+### 请求示例
+
+```text
+GET /api/v1/overview/history?range=7d
+```
+
+### 响应示例
+
+```json
+{
+  "range": "7d",
+  "interval_minutes": 5,
+  "series": [
+    {
+      "ts": "2026-03-20T12:35:00+00:00",
+      "running_job_count": 3,
+      "allocated_gpu_count": 6,
+      "avg_gpu_util_percent": 62.4,
+      "avg_mem_util_percent": 48.7,
+      "low_util_job_count": 1,
+      "active_alert_count": 2
+    }
+  ]
+}
+```
+
+### 字段说明
+
+- `ts`：5 分钟快照时间
+- 其余字段与 `GET /api/v1/overview/realtime` 完全一致
+
+## 3.3 GET /api/v1/jobs
 
 作业列表查询。
 
@@ -251,7 +292,7 @@ GET /api/v1/jobs?range=1d&page=1&page_size=20
 - `range=1w` 使用小时聚合表
 - `range=realtime` 和 `range=1d` 使用分钟表
 
-## 3.3 GET /api/v1/jobs/{job_id}
+## 3.4 GET /api/v1/jobs/{job_id}
 
 查询单个作业详情。
 
@@ -317,7 +358,7 @@ GET /api/v1/jobs/43832?range=1d
 
 - `404`
 
-## 3.4 GET /api/v1/users
+## 3.5 GET /api/v1/users
 
 用户列表查询。
 
@@ -344,7 +385,7 @@ GET /api/v1/jobs/43832?range=1d
 }
 ```
 
-## 3.5 GET /api/v1/users/{user_name}
+## 3.6 GET /api/v1/users/{user_name}
 
 用户详情查询。
 
@@ -393,7 +434,7 @@ GET /api/v1/jobs/43832?range=1d
 }
 ```
 
-## 3.6 GET /api/v1/nodes
+## 3.7 GET /api/v1/nodes
 
 节点列表查询。
 
@@ -419,7 +460,7 @@ GET /api/v1/jobs/43832?range=1d
 }
 ```
 
-## 3.7 GET /api/v1/nodes/{node_name}
+## 3.8 GET /api/v1/nodes/{node_name}
 
 节点详情查询。
 
@@ -467,7 +508,7 @@ GET /api/v1/jobs/43832?range=1d
 }
 ```
 
-## 3.8 GET /api/v1/alerts
+## 3.9 GET /api/v1/alerts
 
 告警列表查询。
 

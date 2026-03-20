@@ -129,6 +129,19 @@ class NodeHeartbeat(Base):
     active_gpu_count: Mapped[int] = mapped_column(Integer)
 
 
+class OverviewSnapshot(Base):
+    __tablename__ = "overview_snapshot"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), unique=True, index=True)
+    running_job_count: Mapped[int] = mapped_column(Integer)
+    allocated_gpu_count: Mapped[int] = mapped_column(Integer)
+    avg_gpu_util_percent: Mapped[float] = mapped_column(Float)
+    avg_mem_util_percent: Mapped[float] = mapped_column(Float)
+    low_util_job_count: Mapped[int] = mapped_column(Integer)
+    active_alert_count: Mapped[int] = mapped_column(Integer)
+
+
 class MetricSampleIn(BaseModel):
     ts: datetime
     cluster_name: str
@@ -568,6 +581,77 @@ def _latest_rows_by_mapping(rows: list[GpuUsageMinute]) -> list[GpuUsageMinute]:
     return list(latest_rows_by_mapping.values())
 
 
+def _build_realtime_overview_payload(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
+    current_time = now or utcnow()
+    since = current_time - timedelta(minutes=15)
+    running_job_keys = _running_job_keys(session)
+    rows = [
+        row
+        for row in session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= since)).scalars().all()
+        if (row.job_id, row.step_id) in running_job_keys
+    ]
+    latest_rows = _latest_rows_by_mapping(rows)
+    if not latest_rows:
+        return {
+            "running_job_count": 0,
+            "allocated_gpu_count": 0,
+            "avg_gpu_util_percent": 0.0,
+            "avg_mem_util_percent": 0.0,
+            "low_util_job_count": 0,
+            "active_alert_count": 0,
+        }
+    job_ids = {row.job_id for row in latest_rows}
+    rows_for_running_jobs = [row for row in latest_rows if row.job_id in job_ids]
+    low_util_jobs = {
+        row.job_id for row in rows_for_running_jobs if row.gpu_util_percent < 10
+    }
+    active_alert_count = session.scalar(select(func.count()).select_from(Alert).where(Alert.status == "active")) or 0
+    return {
+        "running_job_count": len(job_ids),
+        "allocated_gpu_count": len({row.gpu_uuid for row in rows_for_running_jobs}),
+        "avg_gpu_util_percent": round(sum(row.gpu_util_percent for row in rows_for_running_jobs) / len(rows_for_running_jobs), 2),
+        "avg_mem_util_percent": round(sum(row.mem_util_percent for row in rows_for_running_jobs) / len(rows_for_running_jobs), 2),
+        "low_util_job_count": len(low_util_jobs),
+        "active_alert_count": int(active_alert_count),
+    }
+
+
+def _overview_snapshot_bucket(ts: datetime) -> datetime:
+    return ts.replace(minute=(ts.minute // 5) * 5, second=0, microsecond=0)
+
+
+def _record_overview_snapshot(session: Session) -> None:
+    now = utcnow()
+    bucket_ts = _overview_snapshot_bucket(now)
+    existing = session.execute(select(OverviewSnapshot).where(OverviewSnapshot.ts == bucket_ts)).scalar_one_or_none()
+    if existing is not None:
+        return
+    payload = _build_realtime_overview_payload(session, now=now)
+    session.add(
+        OverviewSnapshot(
+            ts=bucket_ts,
+            running_job_count=payload["running_job_count"],
+            allocated_gpu_count=payload["allocated_gpu_count"],
+            avg_gpu_util_percent=payload["avg_gpu_util_percent"],
+            avg_mem_util_percent=payload["avg_mem_util_percent"],
+            low_util_job_count=payload["low_util_job_count"],
+            active_alert_count=payload["active_alert_count"],
+        )
+    )
+
+
+def _serialize_overview_snapshot(row: OverviewSnapshot) -> dict[str, Any]:
+    return {
+        "ts": row.ts.isoformat(),
+        "running_job_count": row.running_job_count,
+        "allocated_gpu_count": row.allocated_gpu_count,
+        "avg_gpu_util_percent": row.avg_gpu_util_percent,
+        "avg_mem_util_percent": row.avg_mem_util_percent,
+        "low_util_job_count": row.low_util_job_count,
+        "active_alert_count": row.active_alert_count,
+    }
+
+
 def _job_runtime_minutes(session: Session, job_id: str) -> float:
     job = session.execute(
         select(JobMeta).where(JobMeta.job_id == job_id).order_by(JobMeta.start_time.asc())
@@ -842,6 +926,7 @@ def _cleanup_retention(session: Session) -> None:
     now = utcnow()
     session.execute(delete(GpuUsageMinute).where(GpuUsageMinute.ts < now - timedelta(days=config.minute_retention_days)))
     session.execute(delete(Alert).where(Alert.start_time < now - timedelta(days=config.hourly_retention_days)))
+    session.execute(delete(OverviewSnapshot).where(OverviewSnapshot.ts < now - timedelta(days=config.hourly_retention_days)))
 
 
 def _fetch_slurm_active_job_ids() -> set[str] | None:
@@ -900,6 +985,7 @@ def _run_worker_cycle(*, run_slurm_reconcile: bool) -> None:
             _reconcile_closed_jobs_with_slurm(session)
         _refresh_hourly_tables(session)
         _scan_alerts(session)
+        _record_overview_snapshot(session)
         _cleanup_retention(session)
         session.commit()
 
@@ -984,45 +1070,26 @@ def ingest_job_state(payload: JobStateIn, session: Session = Depends(get_session
 
 @app.get("/api/v1/overview/realtime")
 def realtime_overview(session: Session = Depends(get_session)) -> dict[str, Any]:
-    since = utcnow() - timedelta(minutes=15)
-    running_job_keys = {
-        (row.job_id, row.step_id)
-        for row in session.execute(select(JobMeta).where(JobMeta.state == "RUNNING")).scalars().all()
-    }
-    rows = [
-        row
-        for row in session.execute(select(GpuUsageMinute).where(GpuUsageMinute.ts >= since)).scalars().all()
-        if (row.job_id, row.step_id) in running_job_keys
-    ]
-    latest_rows_by_mapping: dict[tuple[str, str, str, str], GpuUsageMinute] = {}
-    for row in rows:
-        key = (row.job_id, row.step_id, row.node_name, row.gpu_uuid)
-        existing = latest_rows_by_mapping.get(key)
-        if existing is None or row.ts > existing.ts:
-            latest_rows_by_mapping[key] = row
-    latest_rows = list(latest_rows_by_mapping.values())
-    if not latest_rows:
-        return {
-            "running_job_count": 0,
-            "allocated_gpu_count": 0,
-            "avg_gpu_util_percent": 0.0,
-            "avg_mem_util_percent": 0.0,
-            "low_util_job_count": 0,
-            "active_alert_count": 0,
-        }
-    job_ids = {row.job_id for row in latest_rows}
-    rows_for_running_jobs = [row for row in latest_rows if row.job_id in job_ids]
-    low_util_jobs = {
-        row.job_id for row in rows_for_running_jobs if row.gpu_util_percent < 10
-    }
-    active_alert_count = session.scalar(select(func.count()).select_from(Alert).where(Alert.status == "active")) or 0
+    return _build_realtime_overview_payload(session)
+
+
+@app.get("/api/v1/overview/history")
+def overview_history(range: str = Query("7d"), session: Session = Depends(get_session)) -> dict[str, Any]:
+    if range == "7d":
+        since = utcnow() - timedelta(days=7)
+    elif range == "30d":
+        since = utcnow() - timedelta(days=30)
+    else:
+        raise HTTPException(status_code=400, detail="range must be one of 7d, 30d")
+    rows = session.execute(
+        select(OverviewSnapshot)
+        .where(OverviewSnapshot.ts >= since)
+        .order_by(OverviewSnapshot.ts.asc())
+    ).scalars().all()
     return {
-        "running_job_count": len(job_ids),
-        "allocated_gpu_count": len({row.gpu_uuid for row in rows_for_running_jobs}),
-        "avg_gpu_util_percent": round(sum(row.gpu_util_percent for row in rows_for_running_jobs) / len(rows_for_running_jobs), 2),
-        "avg_mem_util_percent": round(sum(row.mem_util_percent for row in rows_for_running_jobs) / len(rows_for_running_jobs), 2),
-        "low_util_job_count": len(low_util_jobs),
-        "active_alert_count": int(active_alert_count),
+        "range": range,
+        "interval_minutes": 5,
+        "series": [_serialize_overview_snapshot(row) for row in rows],
     }
 
 
