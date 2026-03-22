@@ -7,7 +7,10 @@
 -->
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, onMounted, onUnmounted, useTemplateRef, watch } from 'vue'
+import { Chart } from 'chart.js/auto'
+import type { ChartConfiguration } from 'chart.js'
+import 'chartjs-adapter-luxon'
 import { getMBHumanUnit } from '@/composables/GatewayAPI'
 import type { ClusterStats } from '@/composables/GatewayAPI'
 import { formatGpuPercent, useGpuMonitorAPI, useGpuMonitorPoller } from '@/composables/GpuMonitorAPI'
@@ -15,6 +18,7 @@ import type {
   GpuMonitorAlertItem,
   GpuMonitorJobsListItem,
   GpuMonitorNodesListItem,
+  GpuMonitorOverviewHistoryResponse,
   GpuMonitorOverviewRealtime,
   GpuMonitorUsersListItem
 } from '@/composables/GpuMonitorAPI'
@@ -34,9 +38,15 @@ const { data, unable, loaded, setCluster } = useClusterDataPoller<ClusterStats>(
   10000
 )
 const gpuMonitorAPI = useGpuMonitorAPI()
+const gpuActivityHistoryCanvas = useTemplateRef<HTMLCanvasElement>('gpuActivityHistoryCanvas')
+let gpuActivityHistoryChart: Chart | null = null
 const gpuOverview = useGpuMonitorPoller<GpuMonitorOverviewRealtime>(
   () => gpuMonitorAPI.overviewRealtime(cluster),
   15000
+)
+const gpuOverviewHistory = useGpuMonitorPoller<GpuMonitorOverviewHistoryResponse>(
+  () => gpuMonitorAPI.overviewHistory(cluster, '7d'),
+  30000
 )
 const gpuAlerts = useGpuMonitorPoller<GpuMonitorAlertItem[]>(
   async () => (await gpuMonitorAPI.alerts(cluster, 'active')).items,
@@ -55,6 +65,24 @@ const gpuNodes = useGpuMonitorPoller<GpuMonitorNodesListItem[]>(
   15000
 )
 const gpuOverviewData = computed(() => gpuOverview.data.value)
+const gpuOverviewHistoryData = computed(() => gpuOverviewHistory.data.value)
+const gpuOverviewLast24h = computed(() => {
+  const series = [...(gpuOverviewHistoryData.value?.series || [])].sort((a, b) => a.ts.localeCompare(b.ts))
+  if (!series.length) {
+    return []
+  }
+
+  const latestTimestamp = Date.parse(series[series.length - 1].ts)
+  if (Number.isNaN(latestTimestamp)) {
+    return series
+  }
+
+  const cutoff = latestTimestamp - 24 * 60 * 60 * 1000
+  return series.filter((point) => {
+    const timestamp = Date.parse(point.ts)
+    return !Number.isNaN(timestamp) && timestamp >= cutoff
+  })
+})
 const gpuJobsById = computed(() => new Map((gpuJobs.data.value || []).map((item) => [item.job_id, item])))
 const gpuUsersByName = computed(
   () => new Map((gpuUsers.data.value || []).map((item) => [item.user_name, item]))
@@ -122,17 +150,160 @@ const activeAlertsCards = computed(() => {
     })
 })
 
+function gpuActivityHistoryChartOptions(): ChartConfiguration<'line'>['options'] {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: {
+      mode: 'index',
+      intersect: false
+    },
+    plugins: {
+      legend: {
+        position: 'top'
+      },
+      tooltip: {
+        callbacks: {
+          label(context) {
+            const value = Number((context.raw as { y: number }).y)
+            if (context.dataset.yAxisID === 'y1') {
+              return `${context.dataset.label}: ${value.toFixed(1)}%`
+            }
+            return `${context.dataset.label}: ${value.toFixed(0)}`
+          }
+        }
+      }
+    },
+    scales: {
+      x: {
+        type: 'time',
+        time: {
+          unit: 'hour'
+        },
+        ticks: {
+          maxRotation: 0,
+          autoSkip: true,
+          maxTicksLimit: 8
+        }
+      },
+      y: {
+        position: 'left',
+        beginAtZero: true,
+        title: {
+          display: true,
+          text: 'Allocated GPUs'
+        },
+        ticks: {
+          precision: 0
+        }
+      },
+      y1: {
+        position: 'right',
+        beginAtZero: true,
+        max: 100,
+        grid: {
+          drawOnChartArea: false
+        },
+        title: {
+          display: true,
+          text: 'Avg GPU Utilization (%)'
+        },
+        ticks: {
+          callback(value) {
+            return `${value}%`
+          }
+        }
+      }
+    }
+  }
+}
+
+function ensureGpuActivityHistoryChart() {
+  if (gpuActivityHistoryCanvas.value && !gpuActivityHistoryChart) {
+    gpuActivityHistoryChart = new Chart(gpuActivityHistoryCanvas.value, {
+      type: 'line',
+      data: { datasets: [] },
+      options: gpuActivityHistoryChartOptions()
+    })
+  }
+}
+
+function updateGpuActivityHistoryChart() {
+  ensureGpuActivityHistoryChart()
+  if (!gpuActivityHistoryChart) {
+    return
+  }
+
+  const timeline = gpuOverviewLast24h.value.map((point) => ({
+    x: new Date(point.ts).getTime(),
+    allocatedGpuCount: point.allocated_gpu_count,
+    avgGpuUtil: point.avg_gpu_util_percent
+  }))
+
+  gpuActivityHistoryChart.data.datasets = [
+    {
+      label: 'Allocated GPUs',
+      data: timeline.map((point) => ({ x: point.x, y: point.allocatedGpuCount })),
+      borderColor: 'rgb(37, 99, 235)',
+      backgroundColor: 'rgba(37, 99, 235, 0.16)',
+      yAxisID: 'y',
+      cubicInterpolationMode: 'monotone',
+      tension: 0.12,
+      pointRadius: 0,
+      pointHoverRadius: 3
+    },
+    {
+      label: 'Avg GPU Utilization',
+      data: timeline.map((point) => ({ x: point.x, y: point.avgGpuUtil })),
+      borderColor: 'rgb(5, 150, 105)',
+      backgroundColor: 'rgba(5, 150, 105, 0.16)',
+      yAxisID: 'y1',
+      cubicInterpolationMode: 'monotone',
+      tension: 0.12,
+      pointRadius: 0,
+      pointHoverRadius: 3
+    }
+  ]
+  gpuActivityHistoryChart.options = gpuActivityHistoryChartOptions() || {}
+  gpuActivityHistoryChart.update()
+}
+
 watch(
   () => cluster,
   (new_cluster) => {
     setCluster(new_cluster)
     gpuOverview.restart()
+    gpuOverviewHistory.restart()
     gpuAlerts.restart()
     gpuJobs.restart()
     gpuUsers.restart()
     gpuNodes.restart()
   }
 )
+
+watch(
+  () => gpuOverviewLast24h.value,
+  () => {
+    updateGpuActivityHistoryChart()
+  }
+)
+
+watch(
+  () => gpuActivityHistoryCanvas.value,
+  () => {
+    ensureGpuActivityHistoryChart()
+    updateGpuActivityHistoryChart()
+  }
+)
+
+onMounted(() => {
+  ensureGpuActivityHistoryChart()
+  updateGpuActivityHistoryChart()
+})
+
+onUnmounted(() => {
+  gpuActivityHistoryChart?.destroy()
+})
 </script>
 
 <template>
@@ -322,6 +493,32 @@ watch(
             <div v-else class="flex animate-pulse space-x-4">
               <div class="h-10 w-10 rounded-full bg-slate-200 dark:bg-slate-800"></div>
             </div>
+          </div>
+        </div>
+        <div class="mt-6 rounded-xl border border-gray-200 bg-white p-5 shadow-xs dark:border-gray-800 dark:bg-gray-900">
+          <div class="mb-4">
+            <h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">Past 24 Hours</h3>
+            <p class="text-sm text-gray-500 dark:text-gray-300">
+              Allocated GPUs and average GPU utilization.
+            </p>
+          </div>
+          <div
+            v-if="gpuOverviewLast24h.length"
+            class="h-80"
+          >
+            <canvas ref="gpuActivityHistoryCanvas"></canvas>
+          </div>
+          <div
+            v-else-if="!gpuOverviewHistory.loaded"
+            class="flex h-80 animate-pulse items-center justify-center rounded-lg bg-slate-50 dark:bg-slate-950/40"
+          >
+            <div class="h-24 w-full max-w-3xl rounded-lg bg-slate-200 dark:bg-slate-800"></div>
+          </div>
+          <div
+            v-else
+            class="flex h-80 items-center justify-center rounded-lg border border-dashed border-gray-300 text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400"
+          >
+            No GPU activity history available yet.
           </div>
         </div>
       </section>

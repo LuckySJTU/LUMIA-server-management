@@ -107,6 +107,10 @@ class SlurmwebAppGateway(SlurmwebWebApp, RFLTokenizedWebApp):
         SlurmwebAppRoute("/api/agents/<cluster>/stats", views.stats),
         SlurmwebAppRoute("/api/agents/<cluster>/metrics/<metric>", views.metrics),
         SlurmwebAppRoute("/api/agents/<cluster>/gpu-monitor/overview", views.gpu_monitor_overview),
+        SlurmwebAppRoute(
+            "/api/agents/<cluster>/gpu-monitor/overview/history",
+            views.gpu_monitor_overview_history,
+        ),
         SlurmwebAppRoute("/api/agents/<cluster>/gpu-monitor/jobs", views.gpu_monitor_jobs),
         SlurmwebAppRoute("/api/agents/<cluster>/gpu-monitor/job/<int:job>", views.gpu_monitor_job),
         SlurmwebAppRoute("/api/agents/<cluster>/gpu-monitor/nodes", views.gpu_monitor_nodes),

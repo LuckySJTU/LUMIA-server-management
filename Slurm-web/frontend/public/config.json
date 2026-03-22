@@ -4,5 +4,5 @@
   "AUTHENTICATION": true,
   "RACKSDB_ROWS_LABELS": false,
   "RACKSDB_RACKS_LABELS": false,
-  "VERSION": "26w10a"
+  "VERSION": "26w12a"
 }

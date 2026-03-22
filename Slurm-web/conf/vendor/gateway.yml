@@ -107,7 +107,7 @@ agents:
     - https://cluster2/agent
   version:
     type: str
-    default: 26w10a
+    default: 26w12a
     doc: |
       Minimal support version of Slurm-web agent API
 

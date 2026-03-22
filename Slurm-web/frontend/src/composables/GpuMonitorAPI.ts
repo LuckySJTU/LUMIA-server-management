@@ -5,6 +5,7 @@ import { useRuntimeStore } from '@/stores/runtime'
 
 export type GpuMonitorListRange = 'realtime' | '1d' | '1w'
 export type GpuMonitorDetailRange = '1d' | '1w'
+export type GpuMonitorOverviewHistoryRange = '7d' | '30d'
 
 export interface GpuMonitorOverviewRealtime {
   running_job_count: number
@@ -13,6 +14,22 @@ export interface GpuMonitorOverviewRealtime {
   avg_mem_util_percent: number
   low_util_job_count: number
   active_alert_count: number
+}
+
+export interface GpuMonitorOverviewHistoryPoint {
+  ts: string
+  running_job_count: number
+  allocated_gpu_count: number
+  avg_gpu_util_percent: number
+  avg_mem_util_percent: number
+  low_util_job_count: number
+  active_alert_count: number
+}
+
+export interface GpuMonitorOverviewHistoryResponse {
+  range: GpuMonitorOverviewHistoryRange
+  interval_minutes: number
+  series: GpuMonitorOverviewHistoryPoint[]
 }
 
 export interface GpuMonitorJobsListItem {
@@ -178,6 +195,15 @@ export function useGpuMonitorAPI() {
     return await request<GpuMonitorOverviewRealtime>(`/agents/${cluster}/gpu-monitor/overview`)
   }
 
+  async function overviewHistory(
+    cluster: string,
+    range: GpuMonitorOverviewHistoryRange = '7d'
+  ): Promise<GpuMonitorOverviewHistoryResponse> {
+    return await request<GpuMonitorOverviewHistoryResponse>(
+      `/agents/${cluster}/gpu-monitor/overview/history?range=${range}`
+    )
+  }
+
   async function jobs(
     cluster: string,
     range: GpuMonitorListRange = 'realtime',
@@ -254,6 +280,7 @@ export function useGpuMonitorAPI() {
 
   return {
     overviewRealtime,
+    overviewHistory,
     jobs,
     jobsAll,
     job,

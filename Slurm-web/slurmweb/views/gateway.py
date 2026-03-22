@@ -414,6 +414,12 @@ def gpu_monitor_overview(cluster: str):
 
 @check_jwt
 @validate_cluster
+def gpu_monitor_overview_history(cluster: str):
+    return proxy_gpu_monitor("overview/history")
+
+
+@check_jwt
+@validate_cluster
 def gpu_monitor_jobs(cluster: str):
     return proxy_gpu_monitor("jobs")
 
