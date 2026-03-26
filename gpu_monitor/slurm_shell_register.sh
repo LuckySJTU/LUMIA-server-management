@@ -33,8 +33,9 @@ if [[ -n "${SLURM_STEP_GPUS:-}" ]] || [[ -n "${SLURM_PROCID:-}" ]] || [[ -n "${S
     exit 0
 fi
 
+skip_execution=0
 if compgen -G "${GPU_MONITOR_TASK_EVENT_DIR}/gpu-monitor-step-active-${SLURM_JOB_ID}-*.marker" > /dev/null; then
-    exit 0
+    skip_execution=1
 fi
 
 if [[ -n "${GPU_MONITOR_SHELL_REGISTERED:-}" ]]; then
@@ -49,7 +50,9 @@ if [[ -z "${SLURM_REAL_GPUS:-}" ]]; then
     exit 0
 fi
 
-export SLURM_REAL_GPUS
+if [[ $skip_execution -eq 0 ]]; then
+    export SLURM_REAL_GPUS
 
-export GPU_MONITOR_SHELL_REGISTERED=1
-"${PYTHON_BIN}" -m gpu_monitor.node_agent emit-shell-register-event || true
+    export GPU_MONITOR_SHELL_REGISTERED=1
+    "${PYTHON_BIN}" -m gpu_monitor.node_agent emit-shell-register-event || true
+fi

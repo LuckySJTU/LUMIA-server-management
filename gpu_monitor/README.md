@@ -310,6 +310,16 @@ if [[ -n "${SLURM_JOB_ID:-}" ]]; then
 fi
 ```
 
+```zsh
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    source /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_shell_register.zsh
+fi
+```
+
+其中 `zsh` 版本会额外定义一个可手动重试的命令：
+
+- `gpu_monitor_shell_register`
+
 如果希望对所有普通用户生效，而不是逐个修改用户家目录，建议做系统级 shell 集成。
 
 `bash` 推荐方式：
@@ -333,7 +343,7 @@ esac
 ```zsh
 if [[ -o interactive ]]; then
     if [[ "${EUID:-$(id -u)}" -ne 0 ]] && [[ -n "${SLURM_JOB_ID:-}" ]]; then
-        source /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_shell_register.sh
+        source /home/yxwang/LUMIA-server-management/gpu_monitor/slurm_shell_register.zsh
     fi
 fi
 ```
@@ -346,6 +356,7 @@ fi
 - 由于 `slurm_shell_register.sh` 会在检测到 `SLURM_STEP_ID` 时自动跳过，因此不会与 `sbatch` / `srun` 已存在的 allocation / step 注册链路冲突
 - `bash` 用户通常走 `/etc/profile.d/*.sh`
 - `zsh` 用户通常走 `/etc/zsh/zprofile`
+- 不建议让 `zsh` 直接 `source slurm_shell_register.sh`，因为那个文件按 bash 语法实现，`zsh` 应使用 `slurm_shell_register.zsh`
 
 在启用 `task/cgroup` 的集群上，推荐优先使用真实 GPU 编号：
 
