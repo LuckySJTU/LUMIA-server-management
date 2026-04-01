@@ -66,6 +66,12 @@ const gpuNodes = useGpuMonitorPoller<GpuMonitorNodesListItem[]>(
 )
 const gpuOverviewData = computed(() => gpuOverview.data.value)
 const gpuOverviewHistoryData = computed(() => gpuOverviewHistory.data.value)
+const maxAllocatedGpuAxis = computed(() => {
+  const totalGpus = data.value?.resources.gpus
+  return typeof totalGpus === 'number' && Number.isFinite(totalGpus) && totalGpus > 0
+    ? totalGpus
+    : undefined
+})
 const gpuOverviewLast24h = computed(() => {
   const series = [...(gpuOverviewHistoryData.value?.series || [])].sort((a, b) => a.ts.localeCompare(b.ts))
   if (!series.length) {
@@ -189,6 +195,7 @@ function gpuActivityHistoryChartOptions(): ChartConfiguration<'line'>['options']
       y: {
         position: 'left',
         beginAtZero: true,
+        max: maxAllocatedGpuAxis.value,
         title: {
           display: true,
           text: 'Allocated GPUs'
@@ -283,6 +290,13 @@ watch(
 
 watch(
   () => gpuOverviewLast24h.value,
+  () => {
+    updateGpuActivityHistoryChart()
+  }
+)
+
+watch(
+  () => maxAllocatedGpuAxis.value,
   () => {
     updateGpuActivityHistoryChart()
   }

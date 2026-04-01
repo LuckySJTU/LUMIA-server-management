@@ -607,7 +607,7 @@ def get_overload_job():
 
     rows = []
     for pid, info in ps_info.items():
-        if info.get("user") in ("root", "0"):
+        if info.get("user") in ("root", "0", "openldap", "postgres"):
             continue
         try:
             proc = psutil.Process(pid)
@@ -644,7 +644,7 @@ def collect_kill_overload_and_log():
     for job in overload_job_list:
         logs = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]pid {job[0]}, User {job[1]}, Cmd {job[-1]}"
         load_avg = os.getloadavg()
-        if load_avg[0] > 50:
+        if load_avg[0] > 100:
             try:
                 os.kill(job[0], 9)
                 logs = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Kill {job[0]}, User {job[1]}, Cmd {job[-1]}"
