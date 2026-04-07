@@ -7,7 +7,7 @@
 -->
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, useTemplateRef, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
 import { Chart } from 'chart.js/auto'
 import type { ChartConfiguration } from 'chart.js'
 import 'chartjs-adapter-luxon'
@@ -40,6 +40,7 @@ const { data, unable, loaded, setCluster } = useClusterDataPoller<ClusterStats>(
 const gpuMonitorAPI = useGpuMonitorAPI()
 const gpuActivityHistoryCanvas = useTemplateRef<HTMLCanvasElement>('gpuActivityHistoryCanvas')
 let gpuActivityHistoryChart: Chart | null = null
+const gpuActivityHistoryWindow = ref<'24h' | '7d'>('24h')
 const gpuOverview = useGpuMonitorPoller<GpuMonitorOverviewRealtime>(
   () => gpuMonitorAPI.overviewRealtime(cluster),
   15000
@@ -88,6 +89,13 @@ const gpuOverviewLast24h = computed(() => {
     const timestamp = Date.parse(point.ts)
     return !Number.isNaN(timestamp) && timestamp >= cutoff
   })
+})
+const gpuOverviewDisplayedHistory = computed(() => {
+  const series = [...(gpuOverviewHistoryData.value?.series || [])].sort((a, b) => a.ts.localeCompare(b.ts))
+  if (gpuActivityHistoryWindow.value === '7d') {
+    return series
+  }
+  return gpuOverviewLast24h.value
 })
 const gpuJobsById = computed(() => new Map((gpuJobs.data.value || []).map((item) => [item.job_id, item])))
 const gpuUsersByName = computed(
@@ -184,7 +192,7 @@ function gpuActivityHistoryChartOptions(): ChartConfiguration<'line'>['options']
       x: {
         type: 'time',
         time: {
-          unit: 'hour'
+          unit: gpuActivityHistoryWindow.value === '7d' ? 'day' : 'hour'
         },
         ticks: {
           maxRotation: 0,
@@ -241,7 +249,7 @@ function updateGpuActivityHistoryChart() {
     return
   }
 
-  const timeline = gpuOverviewLast24h.value.map((point) => ({
+  const timeline = gpuOverviewDisplayedHistory.value.map((point) => ({
     x: new Date(point.ts).getTime(),
     allocatedGpuCount: point.allocated_gpu_count,
     avgGpuUtil: point.avg_gpu_util_percent
@@ -289,7 +297,7 @@ watch(
 )
 
 watch(
-  () => gpuOverviewLast24h.value,
+  () => gpuOverviewDisplayedHistory.value,
   () => {
     updateGpuActivityHistoryChart()
   }
@@ -510,14 +518,44 @@ onUnmounted(() => {
           </div>
         </div>
         <div class="mt-6 rounded-xl border border-gray-200 bg-white p-5 shadow-xs dark:border-gray-800 dark:bg-gray-900">
-          <div class="mb-4">
-            <h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">Past 24 Hours</h3>
-            <p class="text-sm text-gray-500 dark:text-gray-300">
-              Allocated GPUs and average GPU utilization.
-            </p>
+          <div class="mb-4 flex items-start justify-between gap-4">
+            <div>
+              <h3 class="text-base font-semibold text-gray-900 dark:text-gray-100">
+                {{ gpuActivityHistoryWindow === '24h' ? 'Past 24 Hours' : 'Past 7 Days' }}
+              </h3>
+              <p class="text-sm text-gray-500 dark:text-gray-300">
+                Allocated GPUs and average GPU utilization.
+              </p>
+            </div>
+            <div class="inline-flex rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+              <button
+                type="button"
+                @click="gpuActivityHistoryWindow = '24h'"
+                :class="[
+                  gpuActivityHistoryWindow === '24h'
+                    ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-700 dark:text-white'
+                    : 'text-slate-500 dark:text-slate-300',
+                  'rounded-md px-3 py-1.5 text-sm font-medium transition'
+                ]"
+              >
+                24h
+              </button>
+              <button
+                type="button"
+                @click="gpuActivityHistoryWindow = '7d'"
+                :class="[
+                  gpuActivityHistoryWindow === '7d'
+                    ? 'bg-white text-slate-900 shadow-xs dark:bg-slate-700 dark:text-white'
+                    : 'text-slate-500 dark:text-slate-300',
+                  'rounded-md px-3 py-1.5 text-sm font-medium transition'
+                ]"
+              >
+                7d
+              </button>
+            </div>
           </div>
           <div
-            v-if="gpuOverviewLast24h.length"
+            v-if="gpuOverviewDisplayedHistory.length"
             class="h-80"
           >
             <canvas ref="gpuActivityHistoryCanvas"></canvas>
