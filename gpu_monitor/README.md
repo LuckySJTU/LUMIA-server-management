@@ -12,6 +12,7 @@
 - [gpu_monitor/node_agent.py](/home/yxwang/LUMIA-server-management/gpu_monitor/node_agent.py)：计算节点常驻 agent + Slurm hook 入口
 - [gpu_monitor/controller_app.py](/home/yxwang/LUMIA-server-management/gpu_monitor/controller_app.py)：汇总节点 API 与后台 worker
 - [gpu_monitor/shared.py](/home/yxwang/LUMIA-server-management/gpu_monitor/shared.py)：公共配置
+- [gpu_monitor/terminate_low_util_jobs.py](/home/yxwang/LUMIA-server-management/gpu_monitor/terminate_low_util_jobs.py)：根据低利用率告警与 Slurm 排队状态自动结束任务
 - [gpu_monitor/slurm_prolog.sh](/home/yxwang/LUMIA-server-management/gpu_monitor/slurm_prolog.sh)：Slurm Prolog 脚本
 - [gpu_monitor/slurm_epilog.sh](/home/yxwang/LUMIA-server-management/gpu_monitor/slurm_epilog.sh)：Slurm Epilog 脚本
 - [gpu_monitor/slurm_task_prolog.sh](/home/yxwang/LUMIA-server-management/gpu_monitor/slurm_task_prolog.sh)：Slurm TaskProlog 脚本
@@ -464,6 +465,34 @@ fi
 - 多卡任务在同一分钟可能产生多条样本，但只计作 1 个分钟桶
 - 平均利用率也按“每分钟先聚合，再对分钟窗口求平均”的方式计算
 - 即使中间偶尔丢了少量分钟样本，只要窗口跨度达到 30 分钟 / 1 小时 / 2 小时，仍可参与对应告警判断
+
+## 低利用率自动结束脚本
+
+新增脚本：
+
+- [gpu_monitor/terminate_low_util_jobs.py](/home/yxwang/LUMIA-server-management/gpu_monitor/terminate_low_util_jobs.py)
+
+当前逻辑：
+
+- 先查询 `GET /api/v1/alerts?status=active&entity_type=job`
+- 只处理 `low_util_30m` / `low_util_2h` / `high_mem_low_gpu` 这三类 job 级低利用率告警
+- 如果当前存在 `Reason=Resources` 的排队任务，则对仍在 `RUNNING` 的低利用率任务做处理
+- 优先级 `< 2000` 的任务，低利用率告警持续超过 `8h` 后执行 `scancel`
+- 优先级 `= 2000` 的任务，低利用率告警持续超过 `4h` 后执行 `scancel`
+
+策略参数在脚本顶部直接调整：
+
+- `HIGH_PRIORITY_VALUE`
+- `LOW_PRIORITY_TIMEOUT`
+- `HIGH_PRIORITY_TIMEOUT`
+- `LOW_UTIL_RULE_NAMES`
+
+使用示例：
+
+```bash
+python3 /home/yxwang/LUMIA-server-management/gpu_monitor/terminate_low_util_jobs.py --dry-run
+python3 /home/yxwang/LUMIA-server-management/gpu_monitor/terminate_low_util_jobs.py
+```
 
 ## 实现说明与边界
 

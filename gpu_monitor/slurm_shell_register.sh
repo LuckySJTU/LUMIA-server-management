@@ -1,58 +1,75 @@
 #!/usr/bin/env bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="${SCRIPT_DIR}/..:${PYTHONPATH:-}"
-if [[ -r /etc/gpu-monitor/agent.env ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source /etc/gpu-monitor/agent.env
-    set +a
-fi
-PYTHON_BIN="${GPU_MONITOR_PYTHON:-/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python3}"
-export GPU_MONITOR_NODE_NAME="${GPU_MONITOR_NODE_NAME:-$(hostname -s)}"
-export GPU_MONITOR_NODE_DB="${GPU_MONITOR_NODE_DB:-/var/lib/gpu-monitor/node-agent.db}"
-export GPU_MONITOR_TASK_EVENT_DIR="${GPU_MONITOR_TASK_EVENT_DIR:-/var/lib/gpu-monitor/events}"
+__gpu_monitor_shell_register_main() {
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    export PYTHONPATH="${SCRIPT_DIR}/..:${PYTHONPATH:-}"
 
-if [[ -z "${SLURM_JOB_ID:-}" ]]; then
-    exit 0
-fi
+    if [[ -r /etc/gpu-monitor/agent.env ]]; then
+        set -a
+        # shellcheck disable=SC1091
+        source /etc/gpu-monitor/agent.env
+        set +a
+    fi
 
-case "$-" in
-    *i*) ;;
-    *) exit 0 ;;
-esac
+    PYTHON_BIN="${GPU_MONITOR_PYTHON:-/home/yxwang/miniconda3/envs/gpumonitor_v1/bin/python3}"
+    export GPU_MONITOR_NODE_NAME="${GPU_MONITOR_NODE_NAME:-$(hostname -s)}"
+    export GPU_MONITOR_NODE_DB="${GPU_MONITOR_NODE_DB:-/var/lib/gpu-monitor/node-agent.db}"
+    export GPU_MONITOR_TASK_EVENT_DIR="${GPU_MONITOR_TASK_EVENT_DIR:-/var/lib/gpu-monitor/events}"
 
-# This shell fallback is only for top-level interactive allocation shells
-# such as salloc. If a step already exists (batch/srun/task), TaskProlog
-# should be the source of truth and this script must not register again.
-if [[ -n "${SLURM_STEP_ID:-}" ]]; then
-    exit 0
-fi
+    if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+        return 0
+    fi
 
-if [[ -n "${SLURM_STEP_GPUS:-}" ]] || [[ -n "${SLURM_PROCID:-}" ]] || [[ -n "${SLURM_LOCALID:-}" ]] || [[ -n "${SLURM_TASK_PID:-}" ]]; then
-    exit 0
-fi
+    case "$-" in
+        *i*) ;;
+        *) return 0 ;;
+    esac
 
-skip_execution=0
-if compgen -G "${GPU_MONITOR_TASK_EVENT_DIR}/gpu-monitor-step-active-${SLURM_JOB_ID}-*.marker" > /dev/null; then
-    skip_execution=1
-fi
+    # This shell fallback is only for top-level interactive allocation shells
+    # such as salloc. If a step already exists (batch/srun/task), TaskProlog
+    # should be the source of truth and this script must not register again.
+    if [[ -n "${SLURM_STEP_ID:-}" ]]; then
+        return 0
+    fi
 
-if [[ -n "${GPU_MONITOR_SHELL_REGISTERED:-}" ]]; then
-    exit 0
-fi
+    if [[ -n "${SLURM_STEP_GPUS:-}" ]] || \
+       [[ -n "${SLURM_PROCID:-}" ]] || \
+       [[ -n "${SLURM_LOCALID:-}" ]] || \
+       [[ -n "${SLURM_TASK_PID:-}" ]]; then
+        return 0
+    fi
 
-if [[ -x /usr/local/bin/get_real_gpu_id ]]; then
-    eval "$(/usr/local/bin/get_real_gpu_id)"
-fi
+    skip_execution=0
+    if compgen -G "${GPU_MONITOR_TASK_EVENT_DIR}/gpu-monitor-step-active-${SLURM_JOB_ID}-*.marker" > /dev/null; then
+        skip_execution=1
+    fi
 
-if [[ -z "${SLURM_REAL_GPUS:-}" ]]; then
-    exit 0
-fi
+    if [[ -n "${GPU_MONITOR_SHELL_REGISTERED:-}" ]]; then
+        return 0
+    fi
 
-if [[ $skip_execution -eq 0 ]]; then
-    export SLURM_REAL_GPUS
+    if [[ -x /usr/local/bin/get_real_gpu_id ]]; then
+        eval "$(/usr/local/bin/get_real_gpu_id)"
+    fi
 
-    export GPU_MONITOR_SHELL_REGISTERED=1
-    "${PYTHON_BIN}" -m gpu_monitor.node_agent emit-shell-register-event || true
-fi
+    if [[ -z "${SLURM_REAL_GPUS:-}" ]]; then
+        return 0
+    fi
+
+    if [[ $skip_execution -eq 0 ]]; then
+        export SLURM_REAL_GPUS
+        export GPU_MONITOR_SHELL_REGISTERED=1
+        "${PYTHON_BIN}" -m gpu_monitor.node_agent emit-shell-register-event || true
+    fi
+
+    return 0
+}
+
+__gpu_monitor_shell_register_main
+__gpu_monitor_shell_register_rc=$?
+
+unset -f __gpu_monitor_shell_register_main
+
+# If sourced, return to the current shell.
+# If executed directly, return is invalid, so fall back to exit.
+return "${__gpu_monitor_shell_register_rc}" 2>/dev/null || exit "${__gpu_monitor_shell_register_rc}"
