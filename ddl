@@ -39,6 +39,7 @@ TZ_ALIAS_MAP = {
     'AoE': 'Etc/GMT+12',
     'UTC': 'UTC',
     'UTC+0': 'Etc/GMT-0',
+    'PT': 'America/Los_Angeles',
     **{'UTC{}'.format(i): f'Etc/GMT{-i}' if i >= 0 else f'Etc/GMT+{-i}' for i in range(-12, 13)}
 }
 
@@ -90,7 +91,7 @@ def main(args):
         print(printc('没有可用的ddl信息，请检查crontab中/opt/ddl/ddl_get_data是否正常运行', fg='red'))
         return
 
-    now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+    now_utc = datetime.now(pytz.utc)
 
     if args.c:
         cato = args.c.upper()

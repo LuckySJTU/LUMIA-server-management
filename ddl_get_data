@@ -36,6 +36,7 @@ TZ_ALIAS_MAP = {
     'UTC+10': 'Etc/GMT-10',
     'UTC+11': 'Etc/GMT-11',
     'UTC+12': 'Etc/GMT-12',
+    'PT': 'America/Los_Angeles',
 }
 
 def parse_to_utc(timestr, tzstr):
@@ -49,14 +50,14 @@ def main():
     url = 'https://ccfddl.com/conference/allconf.yml'
     save_path = '/opt/ddl/allconf.yml'
     response = requests.get(url)
-    with open(save_path, 'wb') as f:
-        f.write(response.content)
+    # with open(save_path, 'wb') as f:
+    #     f.write(response.content)
 
     url = 'https://ccfddl.com/conference/allacc.yml'
     save_path = '/opt/ddl/allacc.yml'
     response = requests.get(url)
-    with open(save_path, 'wb') as f:
-        f.write(response.content)
+    # with open(save_path, 'wb') as f:
+    #     f.write(response.content)
 
     # preprocess allconf data
     with open('/opt/ddl/allconf.yml', 'r') as f:
@@ -64,7 +65,7 @@ def main():
 
     output_data = []
 
-    now_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
+    now_utc = datetime.now(pytz.utc)
     for conf in allconf:
         data = {
             'title': conf['title'],
@@ -72,7 +73,7 @@ def main():
             'sub': conf['sub'],
             'rank': conf['rank']['ccf'],
             'ccf': conf['rank']['ccf'],
-            'core': conf['rank']['core'],
+            'core': conf['rank'].get('core','-'),
             'thcpl': conf['rank'].get('thcpl', '-'),
             'dblp': conf['dblp'],
         }
@@ -88,6 +89,8 @@ def main():
             data['timeline'] = []
             time_entries = []
             for tl in data['timeline_raw']:
+                if 'conflict' in tl.get('comment',''):
+                    continue
                 if 'abstract_deadline' in tl:
                     data['timeline'].append({'deadline': tl['abstract_deadline'], 'comment': 'Abstract Deadline'})
                     if tl['abstract_deadline'] == 'TBD':
@@ -107,9 +110,13 @@ def main():
                 data['deadline'] = str(earliest[0]) if str(earliest[0]) != "2233-01-01 23:59:59" else 'TBD'
                 data['utc_deadline'] = earliest[2]
             else:
-                latest = max(time_utc_list, key=lambda x: x[2])
-                data['deadline'] = None
-                data['utc_deadline'] = latest[2] + timedelta(days=80000)
+                if len(time_utc_list) > 0:
+                    latest = max(time_utc_list, key=lambda x: x[2])
+                    data['deadline'] = None
+                    data['utc_deadline'] = latest[2] + timedelta(days=80000)
+                else:
+                    data['deadline'] = None
+                    data['utc_deadline'] = now_utc + timedelta(days=80000)
 
             output_data.append(deepcopy(data))
 
